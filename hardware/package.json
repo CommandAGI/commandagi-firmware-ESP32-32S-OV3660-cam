@@ -1,0 +1,12 @@
+{
+  "name": "commandagi-camera-hardware",
+  "private": true,
+  "description": "tscircuit schematics for the CommandAGI ESP32-CAM camera",
+  "scripts": {
+    "dev": "tsci dev inmp441-wiring.circuit.tsx",
+    "export": "tsci export png inmp441-wiring.circuit.tsx"
+  },
+  "devDependencies": {
+    "@tscircuit/cli": "^0.1.0"
+  }
+}

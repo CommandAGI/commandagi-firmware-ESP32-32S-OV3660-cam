@@ -1,0 +1,15 @@
+# CommandAGI ESP32-CAM partition table — 4MB flash, dual-OTA, NO factory/secure-boot.
+#
+# Why this layout: two ~1.9MB app slots (ota_0/ota_1) give the camera+BLE+TLS image room to grow
+# AND enable future over-the-air updates with rollback. There is no factory partition and we never
+# enable Secure Boot or Flash Encryption — so the device can ALWAYS be re-flashed over USB-UART with
+# esptool/PlatformIO (a factory partition is not required for USB flashing). The `nvs` partition is
+# where provisioning creds live; a factory-reset just erases the `cagi` NVS namespace, never the app.
+#
+# Name,     Type, SubType,  Offset,    Size,     Flags
+nvs,        data, nvs,      0x9000,    0x5000,
+otadata,    data, ota,      0xe000,    0x2000,
+app0,       app,  ota_0,    0x10000,   0x1E0000,
+app1,       app,  ota_1,    0x1F0000,  0x1E0000,
+spiffs,     data, spiffs,   0x3D0000,  0x20000,
+coredump,   data, coredump, 0x3F0000,  0x10000,
