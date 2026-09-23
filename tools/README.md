@@ -14,7 +14,7 @@ pairing. Each unit is appended to `labels.csv` (the PIN ledger) and optionally r
 `labels.html`.
 
 ```bash
-cd apps/clients/firmware/esp32-cam
+cd apps/clients/firmware/ESP32-32S-OV3660-cam
 
 node tools/batch-flash.mjs                 # random PIN, auto-detect port
 node tools/batch-flash.mjs --port /dev/ttyUSB0

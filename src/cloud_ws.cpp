@@ -98,7 +98,7 @@ bool sendFrame(const uint8_t* buf, size_t len) {
 #if CAGI_VERIFIED_SKU
 bool sendManifest(const String& json) {
   if (!g_started || !g_connected) return false;
-  return ws.sendTXT(json);
+  return ws.sendTXT(json.c_str(), json.length());
 }
 #endif
 

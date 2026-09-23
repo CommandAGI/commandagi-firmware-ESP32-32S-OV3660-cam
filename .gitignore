@@ -4,3 +4,10 @@
 # Per-unit PIN ledger from tools/batch-flash.mjs — a secret (PIN↔MAC map). Never commit.
 labels.csv
 labels.html
+.env
+.env.*
+!.env.example
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store

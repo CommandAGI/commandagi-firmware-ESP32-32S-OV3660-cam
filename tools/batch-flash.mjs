@@ -8,7 +8,7 @@
 // printed label matches what the app shows during pairing. Every unit is appended to labels.csv and
 // (optionally) rendered into a printable labels.html sheet.
 //
-// Usage (from apps/clients/firmware/esp32-cam):
+// Usage (from apps/clients/firmware/ESP32-32S-OV3660-cam):
 //   node tools/batch-flash.mjs                 # one board: random PIN, auto-detect port
 //   node tools/batch-flash.mjs --port /dev/ttyUSB0
 //   node tools/batch-flash.mjs --pin 482913    # force a specific PIN (else random 6 digits)

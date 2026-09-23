@@ -1,4 +1,21 @@
-# CommandAGI ESP32-CAM firmware
+# ESP32-32S-OV3660-cam
+
+Part of [CommandAGI](https://commandagi.com): connecting agents to real computers, robots and
+physical environments. This repository can be cloned independently of the private platform code.
+
+```sh
+git clone https://github.com/CommandAGI/commandagi-firmware-ESP32-32S-OV3660-cam.git
+cd commandagi-firmware-ESP32-32S-OV3660-cam
+```
+
+## Hardware status
+
+The repository name identifies the requested hardware target. The checked-in PlatformIO default
+currently uses the AI-Thinker `esp32cam` board with OV2640 wiring; an ESP32-32S/OV3660 build has not
+been verified in this cleanup. Review `platformio.ini` and `src/config.h` against your exact board
+before flashing. The verified-camera design documents describe additional hardware, not a claim
+that those peripherals are implemented or certified.
+
 
 Turn a ~$6 **AI-Thinker ESP32-CAM** into a camera that streams into your CommandAGI dashboard. You
 pair it from the CommandAGI **mobile app** over Bluetooth — no hardcoded Wi-Fi, no re-flashing to
@@ -12,7 +29,7 @@ power on ──► advertises over BLE ──► app finds it ("My cameras → P
 ```
 
 It remembers everything in flash (NVS), so after a power cycle it reconnects and resumes streaming on
-its own. See the platform-side write-up in [`docs/CAMERAS.md`](../../docs/CAMERAS.md).
+its own. See the platform-side write-up in ``docs/CAMERAS.md`` (platform-internal reference).
 
 ## Hardware
 
@@ -34,7 +51,7 @@ Uses [PlatformIO](https://platformio.org/). The AI-Thinker board has no auto-res
 **first** flash tie **GPIO0 → GND**, power-cycle, then upload; remove the jumper and reset to run.
 
 ```bash
-cd apps/clients/firmware/esp32-cam
+cd .
 pio run                 # build
 pio run -t upload       # flash over USB-UART
 pio device monitor      # watch the serial log (115200 baud)
@@ -66,7 +83,7 @@ reset to run again. `esptool.py erase_flash` then a fresh `pio run -t upload` is
 ## How pairing works (BLE GATT)
 
 The device advertises service `c0a1d61c-0001-…` as **"CommandAGI Cam XXXX"** (XXXX = MAC suffix). The
-contract is shared with the apps in [`packages/domain/core/src/esp32cam.ts`](../../../../packages/domain/core/src/esp32cam.ts)
+contract is shared with the apps in ``packages/domain/core/src/esp32cam.ts`` (platform-internal reference)
 — keep the UUIDs in [`src/config.h`](src/config.h) in sync with it.
 
 | Characteristic | UUID suffix | Props         | Payload                                                                      |
@@ -147,3 +164,12 @@ src/
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
 ```
+
+## License
+
+[MIT](LICENSE).
+
+## Build verification (2026-09-22)
+
+All PlatformIO environments declared by this repository compiled successfully using PlatformIO
+6.2.0. This verifies compilation, not physical wiring, sensor operation or live cloud connectivity.
