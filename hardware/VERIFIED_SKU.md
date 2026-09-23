@@ -3,7 +3,7 @@
 > **Scope.** This is the buildable hardware/EE design for the CommandAGI _verified camera_ — a
 > multi-modal, tamper-evident capture device whose signing key lives in a secure element and whose
 > cross-modal sensor stack makes a screen/print replay measurably hard. It is the physical half of the
-> integrity contract in ``docs/trust/INTEGRITY.md`` (platform-internal reference); the platform
+> integrity contract in ``docs/architecture/trust/INTEGRITY.md`` (platform-internal reference); the platform
 > (scoring, coherence recompute, attestation verify) is the other half. The stock ~$6 AI-Thinker board
 > ([`../README.md`](../README.md)) is unchanged — this is a separate, higher-tier SKU built from the
 > `[env:esp32cam-verified]` PlatformIO env.
@@ -634,13 +634,13 @@ score.
 
 ---
 
-**Cross-references:** ``docs/trust/INTEGRITY.md`` (platform-internal reference) ·
-``docs/platform/CAMERAS.md`` (platform-internal reference) ·
+**Cross-references:** ``docs/architecture/trust/INTEGRITY.md`` (platform-internal reference) ·
+``docs/architecture/platform/CAMERAS.md`` (platform-internal reference) ·
 ``packages/domain/core/src/integrity.ts`` (platform-internal reference) ·
 ``packages/domain/core/src/deviceProvisioning.ts`` (platform-internal reference) ·
 ``packages/domain/core/src/capture-coherence.ts`` (platform-internal reference) ·
-[`../README.md`](../README.md) (hardware BOM) · ``../../src/config.h`` (platform-internal reference) (pin map) ·
-``../../src/crypto.h`` (platform-internal reference) (Ed25519 signing custody) ·
-``../../platformio.ini`` (platform-internal reference) (`[env:esp32cam-verified]`).
+[`../README.md`](../README.md) (hardware BOM) · [`../src/config.h`](../src/config.h) (pin map) ·
+[`../src/crypto.h`](../src/crypto.h) (Ed25519 signing custody) ·
+[`../platformio.ini`](../platformio.ini) (`[env:esp32cam-verified]`).
 </content>
 </invoke>

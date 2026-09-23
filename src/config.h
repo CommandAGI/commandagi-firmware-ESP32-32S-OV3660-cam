@@ -109,7 +109,7 @@
 //     PLATFORMIO_BUILD_FLAGS="-DCAGI_VERIFIED_SKU=1 -DCAGI_SENSOR_LIDAR=1 -DCAGI_SENSOR_THERMAL=1 \
 //       -DCAGI_SENSOR_EMI=1 -DCAGI_SECURE_ELEMENT=1" pio run -e esp32cam-verified -t upload
 //
-// HARD CONSTRAINT (docs/platform/CAMERAS.md): the verified SKU stays USB-re-flashable forever. We do
+// HARD CONSTRAINT (docs/architecture/platform/CAMERAS.md): the verified SKU stays USB-re-flashable forever. We do
 // NOT burn Secure Boot / Flash Encryption eFuses — the signing key's confidentiality comes from the
 // secure element (it never leaves the SE), NOT from locking the board. Re-flashability is preserved.
 #ifndef CAGI_VERIFIED_SKU

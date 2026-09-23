@@ -29,7 +29,7 @@ power on ──► advertises over BLE ──► app finds it ("My cameras → P
 ```
 
 It remembers everything in flash (NVS), so after a power cycle it reconnects and resumes streaming on
-its own. See the platform-side write-up in ``docs/CAMERAS.md`` (platform-internal reference).
+its own. See [the hardware notes](hardware/README.md) for the board and security design.
 
 ## Hardware
 

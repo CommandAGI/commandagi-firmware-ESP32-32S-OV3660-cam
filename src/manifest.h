@@ -11,7 +11,7 @@
 // which sensors are live) and signs it so the claim cannot be forged in transit — but the platform
 // RE-VERIFIES the signature, RECOMPUTES cross-modal coherence from the actual frames, and reads the
 // modality set from the real streams. selfCoherence here is only a hint; the device never gets to set
-// its own integrity score. See docs/trust/INTEGRITY.md §6.
+// its own integrity score. See docs/architecture/trust/INTEGRITY.md §6.
 namespace Manifest {
 
 // Load the manifest signer key custody. On a non-SE build this reads the device Ed25519 seed from NVS

@@ -91,7 +91,7 @@ void emit(uint32_t seq) {
   Tamper::poll();  // fold in any breach that happened since the last emit
   const bool caseIntact = Tamper::tamper_case_intact();
 
-  // We never burn Secure Boot eFuses (the board must stay re-flashable — docs/platform/CAMERAS.md), so
+  // We never burn Secure Boot eFuses (the board must stay re-flashable — docs/architecture/platform/CAMERAS.md), so
   // the standard verified build cannot claim measured boot: report "unverified" honestly. Only a build
   // that has a genuine measured-boot attestation (e.g. via the SE) should report "secure".
   const char* bootState = "unverified";

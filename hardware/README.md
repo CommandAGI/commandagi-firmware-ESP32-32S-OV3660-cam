@@ -63,7 +63,7 @@ board, and INTEGRITY.md §3.2 deliberately does not ask for it.
 ### Re-flashability preserved
 
 Like the stock board, the verified SKU does **NOT** burn Secure Boot / Flash Encryption eFuses
-(`docs/platform/CAMERAS.md` requires the board stay USB-re-flashable). Key confidentiality comes from
+so the board remains USB-re-flashable. Key confidentiality comes from
 the secure element, not from locking the board.
 
 ## Files
