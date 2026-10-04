@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
     const size_t n = DeviceSeal::stamp(f.data(), f.size(), t, stamped.data(), stamped.size());
     if (!s.frameSent(stamped.data(), n, t, true)) fail("frame request: frameSent");
     fwrite(stamped.data(), 1, n, media);
-    if (!s.seal("2026-10-03T12:00:04.995Z", true, log, status)) fail("frame request: seal");
+    if (!s.seal("2026-10-03T12:00:04.995Z", true, log, lockedStatus)) fail("frame request: seal");
     fwrite(s.mediaOutbox().buf, 1, s.mediaOutbox().len, cam);
     s.mediaOutbox().sent(s.mediaOutbox().len);
     fwrite(s.indexOutbox().buf, 1, s.indexOutbox().len, stdout);
