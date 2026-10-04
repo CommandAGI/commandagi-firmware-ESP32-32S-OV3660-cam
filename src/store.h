@@ -9,6 +9,10 @@ struct Creds {
   String apiBaseUrl;  // e.g. https://api.commandagi.com
   String apiKey;      // per-device cagi_ user key — "logged in under your account"
   String deviceName;
+  // Cellular (optional; PROVISION `apn`, `simPin`). The SIM PIN is a secret like psk: kept in NVS,
+  // never logged, never sent anywhere but the modem.
+  String apn;
+  String simPin;
   // Cached session/device the camera registered, so a reboot reuses them instead of creating a new
   // machine every time. Cleared (and re-registered) if the API later 404s them.
   String sessionId;
@@ -20,7 +24,7 @@ struct Creds {
 
 namespace Store {
 void begin();
-bool hasCreds();                 // true once an SSID + apiKey are stored
+bool hasCreds();                 // true once provisioning stored an apiKey (ssid may be empty on cellular builds)
 Creds load();
 void saveProvisioning(const Creds& c);   // ssid/psk/base/key/name (clears cached session/device)
 void saveRegistration(const String& sessionId, const String& deviceId, const String& token);

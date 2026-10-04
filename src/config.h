@@ -70,8 +70,7 @@
 // stream. A board that actually has an INMP441 wired opts in at build time:
 //
 //     pio run -e esp32cam -t upload                       # camera only (default) — always works
-//     PLATFORMIO_BUILD_FLAGS="-DCAGI_AUDIO_ENABLED=1" \
-//       pio run -e esp32cam -t upload                     # camera + mic (mic-equipped boards)
+//     PLATFORMIO_BUILD_FLAGS="-DCAGI_AUDIO_ENABLED=1" pio run -e esp32cam -t upload   # camera + mic
 //
 // (Equivalently `make firmware-flash MIC=1`.) When enabled, the mic runs on I2S1 and the firmware
 // still presence-probes so a misconfigured build degrades gracefully.
@@ -163,6 +162,81 @@
   #endif
 #endif
 
+// ── Cellular (LTE Cat-1 modem over UART, PPP) ───────────────────────────────────────────────────
+// OFF by default. A build with -DCAGI_CELLULAR_ENABLED=1 drives a SIMCom A7670-class modem: PWRKEY
+// power-on, AT setup (SIM PIN, APN, LTE only), then PPP into lwIP, so HTTPS and the realtime socket
+// run over the modem unchanged. It needs lwIP with PPP, which arduino-esp32 2.x's precompiled libs
+// leave out, so cellular envs build Arduino as an ESP-IDF component (`framework = arduino, espidf`,
+// sdkconfig.defaults.<soc> = Arduino's own sdkconfig + CONFIG_LWIP_PPP_SUPPORT). README § Cellular.
+// Link policy: Wi-Fi when it is provisioned and connected, else cellular.
+#ifndef CAGI_CELLULAR_ENABLED
+#define CAGI_CELLULAR_ENABLED 0
+#endif
+#if CAGI_CELLULAR_ENABLED
+  #if !CONFIG_LWIP_PPP_SUPPORT
+    #error "CAGI_CELLULAR_ENABLED needs lwIP PPP: build with framework = arduino, espidf and CONFIG_LWIP_PPP_SUPPORT=y"
+  #endif
+  // Frame interval floor on cellular (ms). At QVGA, JPEG quality 12, a frame is ~10-20 kB, so the
+  // default 33 ms is ~1.1-2.2 GB per hour; 1000 ms is ~36-72 MB per hour. The server can set its own
+  // floor with `cellularIntervalMs` in a control response.
+  #ifndef CAGI_CELLULAR_INTERVAL_MS
+  #define CAGI_CELLULAR_INTERVAL_MS 1000
+  #endif
+  #define CAGI_MODEM_BAUD       115200  // the A7670's power-on rate
+  #ifndef CAGI_MODEM_BAUD_FAST
+  #define CAGI_MODEM_BAUD_FAST  921600  // AT+IPR after sync; the driver falls back to 115200 if it fails
+  #endif
+  // Pins from the product READMEs (hardware/CommandAGI-Cam-00x/README.md § modem pin map). PWRKEY and
+  // RESET drive a transistor that pulls the modem pin low: HIGH = pressed / held. -1 = not wired.
+  #if defined(CAM_BOARD_DFR_S3_AICAM)
+    // Cam-002 carrier: Gravity connector (GPIO43/44) + the microSD contacts (GPIO11/12/13).
+    #define CAGI_MODEM_UART        1
+    #define CAGI_MODEM_TX_PIN     43   // → modem RXD
+    #define CAGI_MODEM_RX_PIN     44   // ← modem TXD (internal pull-up: the shifter floats while the modem is off)
+    #define CAGI_MODEM_PWRKEY_PIN 11
+    #define CAGI_MODEM_STATUS_PIN 12   // HIGH = modem on (internal pull-down)
+    #define CAGI_MODEM_RESET_PIN  13
+    #define CAGI_MODEM_RAIL_OFF_PIN -1
+  #elif defined(CAM_BOARD_AITHINKER)
+    // Cam-001 base board: the five free header pins. IO13/14/15 are also the INMP441 pins.
+    #if CAGI_AUDIO_ENABLED
+      #error "On the AI-Thinker board the modem uses IO13/14/15, the INMP441's pins: enable one of them"
+    #endif
+    #define CAGI_MODEM_UART        2
+    #define CAGI_MODEM_TX_PIN     14   // → modem RXD
+    #define CAGI_MODEM_RX_PIN     13   // ← modem TXD
+    #define CAGI_MODEM_PWRKEY_PIN 12   // a strap pin; the base board's pull-down keeps it low at boot
+    #define CAGI_MODEM_STATUS_PIN 15
+    #define CAGI_MODEM_RESET_PIN  -1
+    #define CAGI_MODEM_RAIL_OFF_PIN 2  // HIGH = modem supply off; recovery only
+  #endif
+  #ifndef CAGI_MODEM_UART
+    #error "CAGI_CELLULAR_ENABLED: define the CAGI_MODEM_* pins for this board"
+  #endif
+#endif
+
+// ── Battery (optional ADC divider + charger STAT) ───────────────────────────────────────────────
+// A board with -DCAGI_BATTERY_ADC_PIN=<gpio> reports the cell voltage and an estimated percent in BLE
+// STATUS and in the runtime `status` message. CAGI_BATTERY_DIVIDER is Vcell / Vpin (2.0 for the
+// Cam-002 battery variant's 100k/100k). A charger STAT pin (-DCAGI_BATTERY_STAT_PIN) adds
+// `charging`; CAGI_BATTERY_STAT_ACTIVE is its level while it charges (open-drain STAT: LOW).
+#ifndef CAGI_BATTERY_ADC_PIN
+#define CAGI_BATTERY_ADC_PIN -1
+#endif
+#ifndef CAGI_BATTERY_DIVIDER
+#define CAGI_BATTERY_DIVIDER 2.0
+#endif
+#ifndef CAGI_BATTERY_STAT_PIN
+#define CAGI_BATTERY_STAT_PIN -1
+#endif
+#ifndef CAGI_BATTERY_STAT_ACTIVE
+#define CAGI_BATTERY_STAT_ACTIVE LOW
+#endif
+
+// How often (ms) the device sends a runtime `status` message with its link and battery while the
+// realtime socket is open (also on connect and on a link change). Cellular and battery builds only.
+#define CAGI_RUNTIME_STATUS_MS 60000
+
 // ── Verified-camera SKU (multi-modal + tamper-evident) ──────────────────────────────────────────
 // The verified SKU is a SEPARATE board build: an ESP32 plus a secure element (ATECC608-class), a
 // chassis tamper switch (or conductive mesh), and one or more corroborating sensors (LiDAR / thermal /
@@ -175,7 +249,7 @@
 // byte-for-byte unchanged. Per-sensor flags gate each HAL driver independently — a unit with LiDAR but
 // no thermal sets only CAGI_SENSOR_LIDAR. Enable at build time, e.g.:
 //
-//     PLATFORMIO_BUILD_FLAGS="-DCAGI_VERIFIED_SKU=1 -DCAGI_SENSOR_LIDAR=1 -DCAGI_SENSOR_THERMAL=1 \
+//     PLATFORMIO_BUILD_FLAGS="-DCAGI_VERIFIED_SKU=1 -DCAGI_SENSOR_LIDAR=1 -DCAGI_SENSOR_THERMAL=1
 //       -DCAGI_SENSOR_EMI=1 -DCAGI_SECURE_ELEMENT=1" pio run -e esp32cam-verified -t upload
 //
 // HARD CONSTRAINT (docs/architecture/platform/CAMERAS.md): the verified SKU stays USB-re-flashable forever. We do

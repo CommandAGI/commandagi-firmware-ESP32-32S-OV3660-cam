@@ -11,12 +11,15 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ArduinoJson.h>
 #include "config.h"
 #include "store.h"
 #include "status.h"
 #include "camera.h"
 #include "audio.h"
 #include "speaker.h"
+#include "cellular.h"
+#include "battery.h"
 #include "cloud.h"
 #include "cloud_ws.h"
 #include "ble_prov.h"
@@ -55,6 +58,22 @@ uint32_t g_nextManifest = 0;    // when to emit the next signed capture manifest
 uint32_t g_manifestSeq = 0;     // capture-window sequence the manifest binds to
 #endif
 uint32_t g_captureFails = 0;  // consecutive Camera::capture() failures (for surfacing + sensor recovery)
+#define CAGI_RUNTIME_STATUS (CAGI_CELLULAR_ENABLED || CAGI_BATTERY_ADC_PIN >= 0)
+#if CAGI_CELLULAR_ENABLED
+// Frame interval floor while the link is cellular (server: `cellularIntervalMs`).
+uint32_t g_cellIntervalMs = CAGI_CELLULAR_INTERVAL_MS;
+bool g_cellStarted = false;
+uint32_t g_wifiUpSince = 0;  // 0 = Wi-Fi down
+uint32_t g_nextWifiTry = 0;
+String g_link;                // wifi | cellular | ""
+#endif
+#if CAGI_RUNTIME_STATUS
+uint32_t g_nextRuntimeStatus = 0;
+bool g_wsWasConnected = false;
+#endif
+#if CAGI_BATTERY_ADC_PIN >= 0
+uint32_t g_nextBattery = 0;
+#endif
 
 void reloadCreds() { g_creds = Store::load(); }
 
@@ -72,7 +91,89 @@ void applyControl(const Cloud::Control& ctl) {
       g_frameIntervalMs = want;
     }
   }
+#if CAGI_CELLULAR_ENABLED
+  if (ctl.cellularIntervalMs > 0) {
+    uint32_t want = ctl.cellularIntervalMs < CAGI_FRAME_INTERVAL_MIN_MS ? CAGI_FRAME_INTERVAL_MIN_MS
+                    : (ctl.cellularIntervalMs > 3600000 ? 3600000 : ctl.cellularIntervalMs);
+    if (want != g_cellIntervalMs) {
+      Serial.printf("[cfg] cellular frame interval %lu → %lu ms\n", (unsigned long)g_cellIntervalMs, (unsigned long)want);
+      g_cellIntervalMs = want;
+    }
+  }
+#endif
 }
+
+#if CAGI_CELLULAR_ENABLED
+// Link policy: Wi-Fi when it is provisioned and connected, else cellular. Returns false when no link
+// is up (the caller retries soon). A link change restarts the realtime socket on the new path.
+bool linkReady(uint32_t now) {
+  if (!g_cellStarted) {
+    Cellular::begin(g_creds.apn, g_creds.simPin);
+    g_cellStarted = true;
+  }
+  const bool hasWifi = g_creds.ssid.length() > 0;
+  bool wifiUp = hasWifi && Cloud::wifiConnected();
+  if (hasWifi && !wifiUp && !Cellular::up() && (int32_t)(now - g_nextWifiTry) >= 0) {
+    // No link at all: one blocking Wi-Fi attempt (the pre-cellular behaviour). After that the station
+    // keeps reconnecting in the background while the modem carries the traffic.
+    wifiUp = Cloud::connectWifi(g_creds);
+    g_nextWifiTry = millis() + 60000;
+  }
+  if (!wifiUp) g_wifiUpSince = 0;
+  else if (!g_wifiUpSince) g_wifiUpSince = millis();
+  // Keep PPP up until Wi-Fi has been up for 60 s, so a flapping Wi-Fi does not drop the link.
+  Cellular::want(!wifiUp || millis() - g_wifiUpSince < 60000);
+
+  const String link = wifiUp ? "wifi" : (Cellular::up() ? "cellular" : "");
+  if (link != g_link) {
+    if (g_link.length()) CloudWs::stop();  // the old socket is bound to the old interface's address
+    g_link = link;
+#if CAGI_RUNTIME_STATUS
+    g_nextRuntimeStatus = 0;
+#endif
+  }
+  const Cellular::Info ci = Cellular::info();
+  if (link == "cellular") {
+    Status::setNetwork(ci.ip);
+    Status::setLink(link, ci.op, ci.rssiDbm, ci.rsrpDbm10);
+  } else {
+    Status::setLink(link, "", wifiUp ? (int)WiFi.RSSI() / 10 * 10 : 0, 0);  // 10 dB steps: fewer notifications
+  }
+  if (!link.length()) {
+    g_streaming = false;
+    g_retryAt = millis() + 1000;
+    return false;
+  }
+  return true;
+}
+#endif
+
+#if CAGI_RUNTIME_STATUS
+// The runtime `status` message: `status: "live"` (what host-core sends) plus the link and battery
+// fields. The platform ignores fields it does not know.
+void sendRuntimeStatus() {
+  const Status::Snapshot st = Status::get();
+  JsonDocument d;
+  d["type"] = "status";
+  d["status"] = "live";
+  if (st.link.length()) d["link"] = st.link;
+  if (st.op.length()) d["operator"] = st.op;
+  if (st.rssiDbm) d["rssi"] = st.rssiDbm;
+  if (st.rsrpDbm10) d["rsrp"] = st.rsrpDbm10 / 10.0;
+#if CAGI_CELLULAR_ENABLED
+  if (st.link == "cellular") d["signalAgeMs"] = Cellular::info().signalAgeMs;
+#endif
+  if (st.batMv >= 0) {
+    JsonObject b = d["battery"].to<JsonObject>();
+    b["mv"] = st.batMv;
+    if (st.batPct >= 0) b["pct"] = st.batPct;
+    if (st.charging >= 0) b["charging"] = st.charging == 1;
+  }
+  String out;
+  serializeJson(d, out);
+  CloudWs::sendText(out);
+}
+#endif
 
 // Turn a failed media POST into the right recovery + a VISIBLE status, and tell the loop to bail this
 // iteration. This is the fix for the "app spins on 'Signing in' forever" class of bug: previously
@@ -171,6 +272,9 @@ void setup() {
 #if CAGI_SPEAKER_ENABLED
   BleProv::setSpeakerPresent(Speaker::begin());
 #endif
+#if CAGI_BATTERY_ADC_PIN >= 0
+  Battery::begin();
+#endif
 
 #if CAGI_VERIFIED_SKU
   // Verified-camera SKU: bring up the tamper latch, corroborating sensors, and the manifest signer.
@@ -232,6 +336,17 @@ void loop() {
     return;
   }
 
+#if CAGI_BATTERY_ADC_PIN >= 0
+  if ((int32_t)(now - g_nextBattery) >= 0) {
+    const Battery::Reading b = Battery::read();
+    Status::setBattery(b.present ? b.mv : -1, b.present ? b.pct : -1, b.charging);
+    g_nextBattery = now + 10000;
+  }
+#endif
+
+#if CAGI_CELLULAR_ENABLED
+  if (!linkReady(now)) return;
+#else
   if (!Cloud::wifiConnected()) {
     g_streaming = false;
     if (!Cloud::connectWifi(g_creds)) {
@@ -239,6 +354,7 @@ void loop() {
       return;
     }
   }
+#endif
 
   if (!Cloud::ensureRegistered(g_creds)) {
     g_retryAt = millis() + 8000;  // bad/revoked API key or API down
@@ -314,7 +430,12 @@ void loop() {
         if (!g_cameraOk) { Status::set("camera_error", "sensor re-init failed"); return; }
       }
     }
-    g_nextFrame = millis() + g_frameIntervalMs;
+#if CAGI_CELLULAR_ENABLED
+    const uint32_t interval = (g_link == "cellular" && g_cellIntervalMs > g_frameIntervalMs) ? g_cellIntervalMs : g_frameIntervalMs;
+#else
+    const uint32_t interval = g_frameIntervalMs;
+#endif
+    g_nextFrame = millis() + interval;
   }
 
   // Mic clip. On the classic ESP32 capture() blocks ~CAGI_AUDIO_CLIP_MS, which paces audio
@@ -343,6 +464,16 @@ void loop() {
     }
     g_nextAudio = millis();  // next clip immediately (gapless) once the current one is sent
   }
+
+#if CAGI_RUNTIME_STATUS
+  const bool wsUp = CloudWs::connected();
+  if (wsUp && !g_wsWasConnected) g_nextRuntimeStatus = 0;  // a fresh socket hears the state at once
+  g_wsWasConnected = wsUp;
+  if (wsUp && (int32_t)(now - g_nextRuntimeStatus) >= 0) {
+    sendRuntimeStatus();
+    g_nextRuntimeStatus = millis() + CAGI_RUNTIME_STATUS_MS;
+  }
+#endif
 
 #if CAGI_VERIFIED_SKU
   // Verified SKU: emit a signed capture manifest sidecar on its own cadence while the frame socket is

@@ -29,6 +29,8 @@ Creds load() {
   c.apiBaseUrl = prefs.getString("base", "https://api.commandagi.com");
   c.apiKey = prefs.getString("apiKey", "");
   c.deviceName = prefs.getString("name", "");
+  c.apn = prefs.getString("apn", "");
+  c.simPin = prefs.getString("simpin", "");
   c.sessionId = prefs.getString("sid", "");
   c.deviceId = prefs.getString("did", "");
   c.token = prefs.getString("tok", "");
@@ -43,6 +45,10 @@ void saveProvisioning(const Creds& c) {
   prefs.putString("base", c.apiBaseUrl);
   prefs.putString("apiKey", c.apiKey);
   prefs.putString("name", c.deviceName);
+  if (c.apn.length()) prefs.putString("apn", c.apn);
+  else prefs.remove("apn");
+  if (c.simPin.length()) prefs.putString("simpin", c.simPin);
+  else prefs.remove("simpin");
   // New creds → drop any cached session/device/token so we re-register cleanly.
   prefs.remove("sid");
   prefs.remove("did");

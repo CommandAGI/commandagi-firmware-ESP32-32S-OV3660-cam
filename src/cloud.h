@@ -11,6 +11,8 @@ struct Control {
   bool mic = true;
   /** Server-desired frame cadence (ms); 0 = the response said nothing → keep the current interval. */
   unsigned long intervalMs = 0;
+  /** Server-desired frame interval floor on cellular (ms); 0 = no opinion. Cellular builds only. */
+  unsigned long cellularIntervalMs = 0;
 };
 
 // Join the LAN with the stored creds. Blocks up to ~20s. Returns true once connected.

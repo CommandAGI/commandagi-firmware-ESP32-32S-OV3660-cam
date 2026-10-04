@@ -228,6 +228,11 @@ bool sendManifest(const String& json) {
 }
 #endif
 
+bool sendText(const String& json) {
+  if (!g_started || !g_connected) return false;
+  return ws.sendTXT(json.c_str(), json.length());
+}
+
 void stop() {
   if (!g_started) return;
   ws.disconnect();

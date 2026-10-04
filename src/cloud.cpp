@@ -77,6 +77,12 @@ static void parseControl(const String& body, Cloud::Control* ctl) {
     ctl->intervalMs = doc["intervalMs"].as<unsigned long>();
     ctl->valid = true;
   }
+#if CAGI_CELLULAR_ENABLED
+  if (doc["cellularIntervalMs"].is<unsigned long>() || doc["cellularIntervalMs"].is<int>()) {
+    ctl->cellularIntervalMs = doc["cellularIntervalMs"].as<unsigned long>();
+    ctl->valid = true;
+  }
+#endif
   JsonVariant s = doc["sensors"];
   if (!s.is<JsonObject>()) return;
   ctl->valid = true;

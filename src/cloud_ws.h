@@ -23,6 +23,8 @@ bool sendFrame(const uint8_t* buf, size_t len);
 // the platform can bind it to the frame-chain segment it covers. See manifest.cpp.
 bool sendManifest(const String& json);
 #endif
+// Send one JSON text message (e.g. the runtime `status`). Only the loop's task may call it.
+bool sendText(const String& json);
 // Close the socket (e.g. on re-provisioning / lost creds).
 void stop();
 }  // namespace CloudWs

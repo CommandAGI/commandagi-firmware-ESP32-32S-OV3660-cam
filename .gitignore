@@ -11,3 +11,8 @@ node_modules/
 __pycache__/
 *.pyc
 .DS_Store
+# ESP-IDF (the cellular envs): the generated config per env and the fetched components.
+sdkconfig.*
+!sdkconfig.defaults.*
+managed_components/
+dependencies.lock

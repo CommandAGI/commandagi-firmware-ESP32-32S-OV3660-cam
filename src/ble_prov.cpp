@@ -108,10 +108,19 @@ class ProvisionCb : public NimBLECharacteristicCallbacks {
     }
     const char* ssid = d["ssid"];
     const char* apiKey = d["apiKey"];
+#if CAGI_CELLULAR_ENABLED
+    // A cellular build may be provisioned without Wi-Fi: it then uses only the modem.
+    if (!ssid) ssid = "";
+    if (!apiKey || strlen(apiKey) < 8) {
+      ::Status::set("error", "provisioning missing apiKey");
+      return;
+    }
+#else
     if (!ssid || !apiKey || strlen(ssid) == 0 || strlen(apiKey) < 8) {
       ::Status::set("error", "provisioning missing ssid/apiKey");
       return;
     }
+#endif
     Creds c;
     c.ssid = ssid;
     c.psk = d["psk"].is<const char*>() ? (const char*)d["psk"] : "";
@@ -119,6 +128,9 @@ class ProvisionCb : public NimBLECharacteristicCallbacks {
     c.apiKey = apiKey;
     c.deviceName = d["deviceName"].is<const char*>() ? (const char*)d["deviceName"]
                                                      : String(CAGI_ADV_NAME_PREFIX) + macSuffix();
+    // Optional cellular fields; a payload without them (every app before cellular) stays valid.
+    c.apn = d["apn"].is<const char*>() ? (const char*)d["apn"] : "";
+    c.simPin = d["simPin"].is<const char*>() ? (const char*)d["simPin"] : "";
     Store::saveProvisioning(c);
     if (g_info) g_info->setValue(infoJson());  // refresh provisioned=true
     g_newProvisioning = true;

@@ -89,13 +89,80 @@ contract is shared with the apps in ``packages/domain/core/src/esp32cam.ts`` (pl
 | Characteristic | UUID suffix | Props         | Payload                                                                      |
 | -------------- | ----------- | ------------- | ---------------------------------------------------------------------------- |
 | INFO           | `…0002`     | read          | `{ kind, model, fw, hwid, name, provisioned, mic, spk?, secure, salt? }`     |
-| STATUS         | `…0003`     | read + notify | `{ state, ip?, sessionId?, deviceId?, error? }`                              |
-| PROVISION      | `…0004`     | write         | PIN-sealed `{ ssid, psk, apiBaseUrl, apiKey, deviceName? }` (see _Security_) |
+| STATUS         | `…0003`     | read + notify | `{ state, ip?, sessionId?, deviceId?, error?, link?, operator?, rssi?, rsrp?, battery? }` |
+| PROVISION      | `…0004`     | write         | PIN-sealed `{ ssid, psk, apiBaseUrl, apiKey, deviceName?, apn?, simPin? }` (see _Security_) |
 | COMMAND        | `…0005`     | write         | `identify` \| `reboot` \| `factory-reset`                                    |
 
 `state` walks `idle → wifi_connecting → registering → streaming` (with `wifi_failed` /
 `register_failed` / `error` branches the app surfaces so you can retry). `paused` means online but
 every sensor was turned off remotely (see _Remote sensor control_).
+
+`link`, `operator`, `rssi`, `rsrp` come only from cellular builds and `battery` (`{ mv, pct?, charging? }`)
+only from battery builds, so the STATUS of other builds does not change. `apn` and `simPin` are
+optional: a payload without them stays valid, and the sealed format does not change. A cellular build
+accepts an empty `ssid` and then uses only the modem.
+
+## Cellular (`-DCAGI_CELLULAR_ENABLED=1`)
+
+Both camera products carry a SIMCom A7670G LTE Cat-1 modem on a carrier or base board. The firmware
+drives it over a UART and runs PPP into lwIP, so HTTPS, the realtime socket and TLS work over the modem
+without change. Default is off (`0`).
+
+| env | board | modem pins (`src/config.h`) |
+| --- | --- | --- |
+| `esp32cam-cellular` | AI-Thinker + Cam-001 base board | UART2: RX IO13, TX IO14; PWRKEY IO12; STATUS IO15; rail off IO2. No mic: IO13/14/15 are the INMP441's pins |
+| `esp32cam-s3-cellular` | DFR1154 + Cam-002 carrier | UART1: TX GPIO43, RX GPIO44 (Gravity); PWRKEY GPIO11; STATUS GPIO12; RESET GPIO13 (microSD contacts) |
+
+Pins come from `hardware/CommandAGI-Cam-001/README.md` and `hardware/CommandAGI-Cam-002/README.md`
+(§ modem pin map). PWRKEY and RESET drive a transistor: HIGH = pressed or held.
+
+**Build.** arduino-esp32 2.x ships lwIP without PPP. The cellular envs therefore build Arduino as an
+ESP-IDF component (`framework = arduino, espidf`). `sdkconfig.defaults.<soc>` is Arduino's own
+sdkconfig plus `CONFIG_LWIP_PPP_SUPPORT` (and octal PSRAM on the S3). The camera driver comes from the
+ESP-IDF component registry (`src/idf_component.yml`, `espressif/esp32-camera` 2.0.4). The sketch file is
+`src/firmware.cpp`, not `main.cpp`, because that build also compiles Arduino's own `main.cpp`.
+
+**Modem sequence** (one task, core 0):
+
+1. Power: PWRKEY high 100 ms, wait for STATUS (≤ 15 s), then `AT` at 115200 or the fast rate. A modem
+   that was already on (an ESP32 reset does not reset it) gets `+++` and `ATH` first.
+2. `ATE0`, `AT+CMEE=2`, `AT+IPR=921600` (falls back to 115200 if the fast rate fails; no RTS/CTS).
+3. SIM: `AT+CPIN?`. If the SIM wants a PIN, the firmware sends the provisioned `simPin` once per boot.
+   It never retries a rejected PIN (three wrong PINs lock the SIM); it reports `SIM PIN rejected`.
+4. `AT+CNMP=38` (LTE only: a GSM burst draws more current than the boards supply), `AT+CGDCONT` with
+   the provisioned `apn` (none = the SIM's default), then `AT+CEREG?` until registered (≤ 180 s).
+5. Signal and operator: `AT+CSQ` (RSSI), `AT+CPSI?` (RSRP), `AT+COPS?`. AT is not available while PPP
+   runs (no CMUX), so these values are from the moment before the dial; `signalAgeMs` says how old.
+6. `ATD*99#`, then PPP. If the modem does not answer AT, the firmware pulses RESET (Cam-002) or cycles
+   the rail (Cam-001), with a growing back-off up to 2 min.
+
+**Link policy.** Wi-Fi when it is provisioned and connected, else cellular. With no link at all the
+firmware tries Wi-Fi once (as before, ≤ 20 s), then brings up the modem while the Wi-Fi station keeps
+reconnecting in the background. It hangs up PPP after Wi-Fi has been up for 60 s, and keeps the modem
+registered for a fast fallback. lwIP routes by interface priority (Wi-Fi 100, PPP 20). A link change
+restarts the realtime socket, because the old socket is bound to the old interface's address.
+
+**Data budget.** A QVGA JPEG at quality 12 is about 10–20 kB. At the default 33 ms (30 fps) that is
+about 1–2 GB per hour; the Cam-002 hardware notes give 0.9 GB/h. On cellular the firmware sends at
+most one frame per `CAGI_CELLULAR_INTERVAL_MS` (default 1000 ms: about 36–72 MB per hour). The server can
+set `cellularIntervalMs` in a control response, as it sets `intervalMs`. The mic adds 32 kB/s (about
+115 MB per hour) while it is on; the operator can turn it off.
+
+**Reported state.** STATUS (BLE) carries `link`, `operator`, `rssi` (dBm) and `rsrp` (dBm). On the
+realtime socket the device sends `{"type":"status","status":"live","link":…,"operator":…,"rssi":…,
+"rsrp":…,"signalAgeMs":…,"battery":{…}}` on connect, on a link change and every 60 s. The platform's
+`status` handler reads `status` and ignores the other fields today.
+
+**Secrets.** The SIM PIN is stored in NVS like the Wi-Fi password and goes only to the modem. The API
+key goes only to the API host, over whichever link is up. Nothing new receives Wi-Fi credentials or keys.
+
+## Battery (`-DCAGI_BATTERY_ADC_PIN=<gpio>`)
+
+A board with a cell divider reports its voltage, an estimated percent (a resting Li-ion curve, not a
+fuel gauge) and, with `-DCAGI_BATTERY_STAT_PIN`, whether it charges. It appears in BLE STATUS
+(`battery`) and in the runtime `status` message. Below 2.5 V the firmware reports no battery: the Cam-002
+no-battery variant fits only the lower resistor, so it reads 0 V. Cam-002-battery: GPIO10, divider 2.
+The Cam-002 charger exposes no STAT pin, so `charging` is absent there.
 
 ## Microphone (optional INMP441)
 
@@ -247,13 +314,20 @@ untouched.
 platformio.ini      build env (board, libs, partitions)
 partitions.csv      dual-OTA, no-secure-boot flash map (re-flashable)
 src/
-  main.cpp          boot + connect/register/stream state machine
+  firmware.cpp      boot + link + connect/register/stream state machine (setup/loop; not main.cpp:
+                    the ESP-IDF build of the cellular envs also compiles Arduino's cores/esp32/main.cpp)
   config.h          version, BLE UUIDs (mirror core), camera pin map, NVS keys
   ble_prov.*        NimBLE provisioning GATT service
   cloud.*           Wi-Fi join + self-registration + frame/audio POST + control poll
   camera.*          OV2640 init + JPEG capture
   audio.*           mic (INMP441 I2S or PDM) init + WAV clip capture (optional; a capture task on S3)
   speaker.*         speaker: I2S TX, fetch, decode, play, results (optional, S3 only)
+  cellular.*        LTE modem: power, AT setup, PPP into lwIP (optional, cellular envs)
+  battery.*         cell voltage / percent / charging (optional)
+  CMakeLists.txt    the ESP-IDF main component (cellular envs only)
+  idf_component.yml esp32-camera from the ESP-IDF registry (cellular envs only)
+CMakeLists.txt      the ESP-IDF project file (cellular envs only)
+sdkconfig.defaults.*  Arduino's sdkconfig + PPP, per SoC (cellular envs only)
   clip.*            speaker clip decoder: WAV PCM16 / MP3 → mono PCM16 (plain C++, host-tested)
   third_party/      minimp3.h (CC0, github.com/lieff/minimp3 at ea99364f)
 test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++
@@ -270,11 +344,12 @@ test/host/          clip_test.cpp: the clip decoder against good and bad clips, 
 All PlatformIO environments declared by this repository compiled successfully using PlatformIO
 6.2.0. This verifies compilation, not physical wiring, sensor operation or live cloud connectivity.
 
-## Build verification (2026-10-03, branch `cam-002-audio`)
+## Build verification (2026-10-03, branches `cam-002-audio` and `cellular`)
 
-PlatformIO 6.2.0 compiled `esp32cam`, `esp32cam-s3`, `esp32cam-verified`, both with
-`-DCAGI_AUDIO_ENABLED=1` for the INMP441 path, and `hardware/CommandAGI-Cam-002/firmware`
-(`esp32cam-s3` + mic + speaker). `test/host/clip_test.cpp` passed with g++ against built WAVs and
+PlatformIO 6.2.0 compiled `esp32cam`, `esp32cam-s3`, `esp32cam-verified`, `esp32cam-cellular`,
+`esp32cam-s3-cellular`, `esp32cam` and `esp32cam-verified` with `-DCAGI_AUDIO_ENABLED=1` (the INMP441
+path), `hardware/CommandAGI-Cam-001/firmware`, and `hardware/CommandAGI-Cam-002/firmware`
+(`commandagi-cam-002`, `commandagi-cam-002-battery`: S3 + mic + speaker + cellular, + battery). `test/host/clip_test.cpp` passed with g++ against built WAVs and
 minimp3's layer III vectors:
 
 ```sh
@@ -282,4 +357,5 @@ g++ -std=c++17 -O1 -Wall -Isrc test/host/clip_test.cpp src/clip.cpp -o /tmp/clip
 ```
 
 This is compilation and a host test only. No board ran this firmware: the PDM mic, the capture task,
-the speaker, the WebSocket messages and the video rate with the mic on are not verified on hardware.
+the speaker, the WebSocket messages, the video rate with the mic on, the modem sequence, PPP, the
+`AT+CPSI?` RSRP field order and the battery reading are not verified on hardware.

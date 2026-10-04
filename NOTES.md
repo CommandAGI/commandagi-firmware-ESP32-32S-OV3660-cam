@@ -126,3 +126,18 @@ MIT. minimp3 is CC0, one header, and builds unchanged on arduino-esp32 2.x. It k
 scratch on the stack, so the speaker task has a 40 kB stack. The task decodes the whole clip into
 PSRAM before it reports `ok`, so `durationMs` is the real length and a bad clip fails before any
 sound.
+
+## Cellular: PPP needs an ESP-IDF build
+
+arduino-esp32 2.x's precompiled lwIP has no PPP (`CONFIG_LWIP_PPP_SUPPORT` is off), and its `PPP` class
+exists only in 3.x. TinyGSM would use the modem's own TCP/TLS stack, so HTTPS and the WebSocket client
+would need other code. The cellular envs instead build Arduino as an ESP-IDF 4.4.7 component with
+Arduino's own sdkconfig plus PPP, and feed the modem's UART into an esp_netif PPP interface. Everything
+above lwIP is unchanged. The plain envs keep the precompiled build. Two traps: the sketch is
+`firmware.cpp` (an IDF build that takes sources from outside the project names objects by basename, and
+Arduino has a `main.cpp`), and the esp32-camera driver must come from the component registry.
+
+## Cellular: what the firmware never does
+
+It never retries a SIM PIN (three wrong PINs lock the SIM), never enables GSM (`AT+CNMP=38`: a GSM
+burst draws more than the boards supply), and never logs an AT command (AT+CPIN carries the PIN).
