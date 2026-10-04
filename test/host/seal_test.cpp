@@ -15,6 +15,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "chip_lock_status.h"
 #include "device_seal.h"
 extern "C" {
 #include "tweetnacl.h"
@@ -114,7 +115,14 @@ int main(int argc, char** argv) {
   FILE* cam = fopen(argv[2], "wb");
   if (!media || !cam) return 2;
   const char* block = "{\"chain\":\"solana:devnet\",\"hash\":\"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin\",\"slot\":4242}";
-  const char* status = "{\"boot\":\"unverified\",\"flash\":\"plain\",\"fw\":\"1.3.0\"}";
+  // A dev unit's status (nothing locked), then a locked unit's: each verifies as the seal's own field.
+  using ChipLockStatus::Download;
+  using ChipLockStatus::Flash;
+  char devStatus[160], lockedStatus[160], shortBuf[40];
+  if (!ChipLockStatus::json({false, Flash::Plain, false, false, Download::Open}, "1.3.0", devStatus, sizeof devStatus) ||
+      !ChipLockStatus::json({true, Flash::Release, true, true, Download::Secure}, "1.3.0", lockedStatus, sizeof lockedStatus) ||
+      ChipLockStatus::json({true, Flash::Release, true, true, Download::Secure}, "1.3.0", shortBuf, sizeof shortBuf))
+    fail("status");
   std::vector<uint8_t> stamped;
   // What the recorder kept last of each stream: its last seal's hash and seq, and the media file's length.
   std::string indexPrev, camPrev;
@@ -141,7 +149,7 @@ int main(int argc, char** argv) {
     }
     char t[32];
     snprintf(t, sizeof t, "2026-10-03T12:00:%02d.950Z", sec);
-    if (!s.seal(t, true, sec ? block : nullptr, status)) fail("seal");
+    if (!s.seal(t, true, sec ? block : nullptr, sec < 3 ? devStatus : lockedStatus)) fail("seal");
     if (refused) {
       // The recorder refused cam's group: it keeps nothing more of either stream until the camera resumes.
       const DeviceSeal::FileState ix{indexSeq, indexPrev.c_str(), 0}, mx{camSeq, camPrev.c_str(), mediaBytes};

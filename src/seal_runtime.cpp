@@ -11,6 +11,7 @@
 #include <time.h>
 #include <sodium.h>
 #include "mbedtls/base64.h"
+#include "chip_lock.h"
 #include "device_seal.h"
 #include "cloud.h"
 #include "cloud_ws.h"
@@ -33,7 +34,7 @@ uint8_t g_spki[44] = {0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03
 char g_spkiB64u[64];
 String g_chain;  // JSON array of base64 DER certificates, leaf first; empty until the factory certifies the key
 String g_announce;
-char g_status[96];
+char g_status[160];
 String g_block;  // canonical {"chain","hash","slot"} of the last block fetched; empty for none
 uint64_t g_seqLimit = 0, g_mediaSeqLimit = 0, g_counterLimit = 0;
 uint32_t g_nextSeal = 0, g_nextBlock = 0;
@@ -213,9 +214,7 @@ void begin() {
   b64u(g_spki, sizeof g_spki, g_spkiB64u);
   g_announce = g_chain.length() ? g_chain : String(g_spkiB64u);
   // What the device says about itself in each seal: signed, so not forged in transit; still a claim.
-  snprintf(g_status, sizeof g_status, "{\"boot\":\"%s\",\"flash\":\"%s\",\"fw\":\"%s\"}",
-           esp_secure_boot_enabled() ? "verified" : "unverified", esp_flash_encryption_enabled() ? "encrypted" : "plain",
-           CAGI_FW_VERSION);
+  ChipLockStatus::json(ChipLock::facts(), CAGI_FW_VERSION, g_status, sizeof g_status);
 
   g_index = (seal_ctx*)psram(sizeof(seal_ctx));
   g_media = (seal_ctx*)psram(sizeof(seal_ctx));
@@ -241,7 +240,7 @@ void serial() {
     if (c == '\r') continue;
     if (c == '\n') {
       g_line[g_lineLen] = 0;
-      if (g_lineLen && g_ready) command(g_line);
+      if (g_lineLen && !ChipLock::command(g_line) && g_ready) command(g_line);
       g_lineLen = 0;
     } else if (g_lineLen + 1 < sizeof g_line) {
       g_line[g_lineLen++] = (char)c;

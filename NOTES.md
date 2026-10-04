@@ -82,10 +82,12 @@ the device where its file is; it is not the device's to guess.
 ## Sealed stream: the key and the board's locks
 
 The key is made on the device and never leaves it: the serial port and BLE give out only the public
-key. The default builds keep the "always re-flashable" rule, so the key sits in plain NVS and the seals
-say `flash: plain`, `boot: unverified`. A production build needs secure boot v2, flash encryption in
-release mode and NVS encryption (flash encryption alone leaves NVS in the clear). Those burn eFuses for
-good and need the owner's signing key, so no env here turns them on.
+key. The envs here keep the "always re-flashable" rule, so the key sits in plain NVS and the seals say
+`boot: unverified`, `flash: plain`, `nvs: plain`. CommandAGI-Cam-002's production envs (in the CommandAGI
+repository, `hardware/CommandAGI-Cam-002/firmware`) lock a unit at the factory: secure boot v2, flash
+encryption in release mode and NVS encryption (an encrypted `nvs_keys` partition: ESP-IDF 4.4 has no eFuse
+HMAC scheme, and flash encryption alone leaves NVS in the clear). This firmware only reports the lock
+(`src/chip_lock.cpp`, read-only) and takes the PIN from NVS in a build that asks for it (`CAGI_PROV_PIN_NVS`).
 
 ## Audio on the ESP32-S3: two I2S ports, no camera conflict
 

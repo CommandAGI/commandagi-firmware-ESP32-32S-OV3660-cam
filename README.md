@@ -55,6 +55,11 @@ pio device monitor      # watch the serial log (115200 baud)
 > Encryption, and never burns the download-disable eFuse. The partition table keeps two OTA app slots
 > ([`partitions.csv`](partitions.csv)) so you can always re-flash over USB **and** push OTA updates
 > later. A factory-reset wipes only the stored credentials (the `cagi` NVS namespace), never the app.
+>
+> The one exception is deliberate and is not in this repository: CommandAGI-Cam-002's production envs
+> (CommandAGI's `hardware/CommandAGI-Cam-002/firmware`) lock a unit for good at the factory, so that its
+> sealing key cannot be copied (§ Sealed stream). A locked unit is not covered by this guarantee. Every
+> env here stays open.
 
 ### Why it can ALWAYS be re-flashed (the guarantee)
 
@@ -63,9 +68,10 @@ reset where GPIO0 is held low — so no firmware can ever block re-flashing. The
 permanently lock a board is **burning an eFuse** (Secure Boot, Flash Encryption, or the
 download-disable bit), and this firmware does **none** of that:
 
-- No `esp_efuse_*` call anywhere in `src/`. The only `esp_secure_boot_*` / `esp_flash_encrypt*` calls are
-  the read-only `esp_secure_boot_enabled()` and `esp_flash_encryption_enabled()` (a sealing build
-  reports them in its seals); they change nothing.
+- No eFuse is written anywhere in `src/`. The only `esp_efuse_*`, `esp_secure_boot_*` and
+  `esp_flash_encrypt*` calls are reads in `src/chip_lock.cpp` (`esp_efuse_read_field_bit()`,
+  `esp_secure_boot_enabled()`, `esp_flash_encryption_enabled()`, `esp_get_flash_encryption_mode()`): a
+  sealing build reports them in its seals; they change nothing.
 - No Secure Boot / Flash Encryption build flags — `platformio.ini` produces a plain, unencrypted image.
 - The partition table's `Flags` column is empty (no `encrypted` partitions).
 - `factory-reset` calls `Preferences.clear()` on just the `cagi` NVS namespace — never `nvs_flash_erase()`
@@ -321,11 +327,26 @@ it on; any env builds with it.
 
 **The key.** On its first boot the device makes an Ed25519 key (32 random bytes from
 `esp_fill_random()` while the radio is on; libsodium signs) and keeps it in NVS, namespace `cagi-seal`.
-A factory-reset does not erase it: the key is the unit's identity, not the owner's. The key is in plain
-flash unless the build has flash encryption with NVS encryption (§ Not done). Each seal says so in its
-`status`: `{"boot":"verified|unverified","flash":"encrypted|plain","fw":"…"}` (what
-`esp_secure_boot_enabled()` and `esp_flash_encryption_enabled()` return). That is the device's own
-claim, signed.
+A factory-reset does not erase it: the key is the unit's identity, not the owner's. In every env here
+the key is in plain flash: anyone who holds the board can copy it. A CommandAGI-Cam-002 production unit
+is locked at the factory before the key is made (below, the production lock).
+
+**The status.** Each seal's `status` says what the chip reports at boot (`src/chip_lock_status.h`, canonical
+JSON, keys sorted, because the signature covers the canonical form):
+
+| field | values | read from | what it shows when locked |
+| --- | --- | --- | --- |
+| `boot` | `verified`, `unverified` | `esp_secure_boot_enabled()` | the ROM and the bootloader run only signed firmware |
+| `flash` | `release`, `development`, `plain` | `esp_flash_encryption_enabled()`, `esp_get_flash_encryption_mode()` | flash is ciphertext; release: no plaintext reflash, no readout |
+| `nvs` | `encrypted`, `plain` | `CONFIG_NVS_ENCRYPTION` and an `nvs_keys` partition that flash encryption covers | the key in NVS is ciphertext |
+| `jtag` | `off`, `on` | eFuses `HARD_DIS_JTAG` and `DIS_USB_JTAG` (ESP32: `DISABLE_JTAG`) | no debugger reads RAM |
+| `dl` | `secure`, `off`, `open` | eFuses `ENABLE_SECURITY_DOWNLOAD`, `DIS_DOWNLOAD_MODE` | the ROM loader cannot read flash |
+| `fw` | the firmware version | `CAGI_FW_VERSION` | — |
+
+The status is the device's own report, signed by the key it protects. It is not forged in transit, but
+firmware that lies would sign a lie: a verifier believes it only as far as it believes the key's
+certificate, and the factory that checked the same eFuses with the ROM's own report before it certified
+the key. None of it says what the sensor saw.
 
 **What it writes.** Two channels, both declared `seals: "device"` in the `channels` message:
 
@@ -374,26 +395,46 @@ another frame; the recorder drops what comes before that. A reboot, a lost link 
 gap the files show (skipped seqs, a jump in time), and the seals still verify.
 
 **The certificate.** The factory certifies the key with CommandAGI's `scripts/integrity/device-ca.mjs`
-(`--key software --envelope none` for Cam-002). On the bench, before the unit has creds:
+(`--key software --envelope none`, and `--lock none` or `efuse` for Cam-002). CommandAGI's
+`scripts/integrity/factory-unit.mjs` runs these steps for one unit and writes its provisioning record;
+the production CA certifies only from a record that shows the lock. By hand, for a dev unit, on the
+bench before the unit has creds:
 
 ```sh
 python3 tools/seal-provision.py spki /dev/ttyACM0 > unit.spki.pem
-node scripts/integrity/device-ca.mjs issue --env dev --spki unit.spki.pem --product CommandAGI-Cam-002 \
-  --serial <serial> --key software --envelope none > unit.chain.pem      # in the CommandAGI repository
+node scripts/integrity/device-ca.mjs issue --env dev --spki unit.spki.pem --product CommandAGI-Cam-002-no-battery \
+  --serial <serial> --key software --envelope none --lock none > unit.chain.pem   # in the CommandAGI repository
 python3 tools/seal-provision.py chain /dev/ttyACM0 unit.chain.pem
 ```
 
 The serial commands are `seal-spki` (the key as PEM), `seal-chain <JSON array of base64 DER, leaf
-first>` (refused unless the leaf holds this unit's key), `seal-chain-clear` and `seal-status`. BLE INFO
-also carries the key (`sealKey`, base64url SPKI).
+first>` (refused unless the leaf holds this unit's key), `seal-chain-clear`, `seal-status` and
+`prov-pin <6 digits>`. BLE INFO also carries the key (`sealKey`, base64url SPKI). No command reads the
+private key, and none can be made to: the firmware has no code that prints or sends it.
+
+**The production lock** (CommandAGI-Cam-002's `-production` envs; CommandAGI's
+`hardware/CommandAGI-Cam-002/README.md` § integrity has the decision and what it does and does not
+protect against). The build adds secure boot v2, flash encryption in release mode, NVS encryption,
+secure download mode, anti-rollback and no core dump; its partition table adds an encrypted `nvs_keys`
+partition. The factory (CommandAGI's `scripts/integrity/factory-unit.mjs`) burns the two firmware-signing
+key digests; the signed bootloader burns the rest on the first boot; then the app makes the NVS keys
+and the sealing key, inside the locked chip. Such a build is one signed image for every unit, so it
+cannot compile a per-unit PIN in: with `-DCAGI_PROV_PIN_NVS=1` the PIN comes from NVS (`cagi-fac`, which a
+factory-reset keeps), written once by `prov-pin` (a second `prov-pin` is refused), and a unit with no PIN
+refuses every PROVISION write. On the bench, before the unit has creds:
+
+```sh
+python3 tools/seal-provision.py status /dev/ttyACM0 --wait 300   # waits through the first boot's encryption
+python3 tools/seal-provision.py pin    /dev/ttyACM0 482913
+```
 
 **Not done.**
 
 - No board ran it. The host test (`test/host/seal_test.cpp`) and the builds are all that was checked.
-- Production protection of the key: secure boot v2 and flash encryption in release mode, with NVS
-  encryption (an `nvs_keys` partition) so that the key in NVS is encrypted too. Flash encryption alone
-  does not encrypt NVS. These burn eFuses and need the owner's signing key, so no env enables them; the
-  seals say `flash: plain` until one does.
+- The production lock has not run on a board: no eFuse was burned. The builds compile and are signed with a
+  throwaway key pair, and the factory script runs against a fake board only.
+- No over-the-air update: a locked unit cannot be updated until the firmware has one (it must verify the
+  new image, which `CONFIG_SECURE_SIGNED_ON_UPDATE` does, and revoke a leaked key's digest slot).
 - No unit has streamed to the deployed recorder. The host test runs this sealing code through a refused
   second and a resume, and CommandAGI's recorder check (`checkSealGroup`) accepts every group it sent.
 
@@ -412,7 +453,8 @@ remotely (it never needs a power-cycle to resume).
 "cagi-cam-prov-v1")`, `wire = IV(12) || AES-256-GCM(key, IV, json) || tag(16)`. The firmware
   decrypts with mbedtls and rejects a wrong PIN (STATUS → `error: wrong PIN…`). A BLE sniffer without
   the PIN learns nothing. **The PIN is out-of-band** — set a unique `CAGI_PROV_PIN` per unit and print
-  it on the device's label (the reference build defaults to `123456`).
+  it on the device's label (the reference build defaults to `123456`). A build with
+  `-DCAGI_PROV_PIN_NVS=1` has no PIN compiled in: the factory writes it once (`prov-pin`, § Sealed stream).
 - The `apiKey` is a **per-device, revocable** `cagi_` key the app mints for you. Revoke it on the
   API-keys page to instantly log the camera out.
 - Optional hardware bonding: set `CAGI_BLE_REQUIRE_BONDING 1` to also require an encrypted,
@@ -449,6 +491,8 @@ src/
   seal/             seal.h, seal.c: CommandAGI's deployments/clients/seal-c, verbatim (plain C)
   device_seal.*     the sealed camera streams: stamp, index, seal, outboxes (plain C++, host-tested)
   seal_runtime.*    the key in NVS, libsodium Ed25519, SNTP, the block, the serial commands (optional)
+  chip_lock.*       the chip's lock as it reports it (read-only), the PIN from NVS, `prov-pin`
+  chip_lock_status.h  the seal's status object from the lock's facts (plain C++, host-tested)
   ir.*              IR night mode: GPIO47, the LTR-308, the night tuning (optional, DFR1154)
   ir_policy.h       the IR decision with hysteresis (plain C++, host-tested)
   CMakeLists.txt    the ESP-IDF main component (cellular envs only)
@@ -522,3 +566,14 @@ PlatformIO 6.2.0 compiled every env on the merged tree: `esp32cam` 1,325,649 byt
 `hardware/CommandAGI-Cam-002/firmware`'s `commandagi-cam-002` 1,427,889 and `commandagi-cam-002-battery` 1,438,693.
 `test/host/ir_policy_test.cpp` passed, and CommandAGI's `tests/workbench/seal-c.test.mjs` passed over
 `test/host/seal_test.cpp`. No board ran it.
+
+## Build verification (2026-10-04, branch `production-lock`: the chip's lock in the status, the PIN from NVS)
+
+PlatformIO 6.2.0 (espressif32 6.13.0, ESP-IDF 4.4.7, esptool 4.11.0) compiled every env: `esp32cam` 1,325,917 bytes
+of flash, `esp32cam` with `-DCAGI_DEVICE_SEALS=1` 1,471,661, `esp32cam-s3` 1,185,421, `esp32cam-s3-seals` 1,328,929,
+`esp32cam-cellular` 1,384,153, `esp32cam-s3-cellular` 1,238,221, and CommandAGI's `hardware/CommandAGI-Cam-002/firmware`:
+`commandagi-cam-002` 1,428,853, `commandagi-cam-002-battery` 1,439,657, and the two production envs 1,429,377 and
+1,440,177, signed with a throwaway key pair made for the build (signed app 1,445,888 bytes, signed bootloader 32,768).
+`test/host/ir_policy_test.cpp` passed, and CommandAGI's `tests/workbench/seal-c.test.mjs` passed over
+`test/host/seal_test.cpp`, whose seals now carry a dev unit's status and a locked unit's; with the status keys out of
+order, the test fails. No board ran it, and no eFuse was burned.

@@ -31,6 +31,11 @@
 #ifndef CAGI_PROV_PIN
 #define CAGI_PROV_PIN "123456"
 #endif
+// A production build is one signed image for all units, so it takes the PIN from NVS, written once by the
+// factory over USB (`prov-pin`; src/chip_lock.cpp), and ignores CAGI_PROV_PIN.
+#ifndef CAGI_PROV_PIN_NVS
+#define CAGI_PROV_PIN_NVS 0
+#endif
 // HKDF `info` — keep in lockstep with CAGI_PROV_HKDF_INFO in packages/domain/core/src/esp32cam.ts.
 #define CAGI_PROV_HKDF_INFO "cagi-cam-prov-v1"
 

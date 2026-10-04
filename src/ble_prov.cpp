@@ -5,6 +5,7 @@
 #include "store.h"
 #include "status.h"
 #include "crypto.h"
+#include "chip_lock.h"
 #include "seal_runtime.h"
 
 namespace {
@@ -80,7 +81,12 @@ class ProvisionCb : public NimBLECharacteristicCallbacks {
     String jsonStr;
 #if CAGI_PROV_SECURE
     // Sealed: IV(12) || AES-256-GCM(ct) || tag(16), keyed by the PIN + per-boot salt.
-    if (!Crypto::openSealed((const uint8_t*)raw.data(), raw.size(), CAGI_PROV_PIN, g_salt, sizeof(g_salt), jsonStr)) {
+    const char* pin = ChipLock::provPin();
+    if (!pin) {
+      ::Status::set("error", "this unit has no PIN yet");
+      return;
+    }
+    if (!Crypto::openSealed((const uint8_t*)raw.data(), raw.size(), pin, g_salt, sizeof(g_salt), jsonStr)) {
       ::Status::set("error", "wrong PIN or corrupt payload");
       return;
     }
