@@ -531,6 +531,7 @@ sdkconfig.defaults.*  Arduino's sdkconfig + PPP, per SoC (cellular envs only)
 test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++;
                     seal_test.cpp: the sealed streams, verified by CommandAGI's JavaScript verifier;
                     ir_policy_test.cpp: the IR decision against a light level that crosses the thresholds
+                    base_url_test.cpp: the realtime socket's scheme, host and port from apiBaseUrl
 tools/              batch-flash.mjs, read-suffix.py (labels); seal-provision.py (the key's certificate)
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
@@ -613,3 +614,18 @@ PlatformIO 6.2.0 compiled every env: `esp32cam` 1,325,649 bytes of flash (unchan
 `commandagi-cam-002-battery` 1,440,189. CommandAGI's `tests/workbench/seal-c.test.mjs` passed over
 `test/host/seal_test.cpp`: the seals name the log's head, and the frame request's answer names the seal over its
 frame, which verifies in JavaScript. No board ran it.
+
+## Build verification (2026-10-04, `main`: the socket keeps the API base's port)
+
+The realtime socket now goes to the scheme, host and port of `apiBaseUrl` (`src/base_url.h`): `https` → `wss`
+(default 443), `http` → `ws` (default 80). Before, it always dialed `wss://<host>:443`, so a local host on the LAN had
+to listen on 443. PlatformIO 6.2.0 compiled `esp32cam` 1,326,065 bytes of flash, `esp32cam-s3` 1,185,545,
+`esp32cam-s3-seals` 1,330,521, `esp32cam-cellular` 1,384,353, `esp32cam-s3-cellular` 1,238,309, and
+`hardware/CommandAGI-Cam-002/firmware`'s `commandagi-cam-002` 1,430,477 and `commandagi-cam-002-battery` 1,441,285. The
+host test passed:
+
+```sh
+g++ -std=c++17 -O1 -Wall -Werror -Isrc test/host/base_url_test.cpp -o /tmp/base_url_test && /tmp/base_url_test
+```
+
+No board ran it.

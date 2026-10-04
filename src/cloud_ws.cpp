@@ -2,6 +2,7 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include "config.h"
+#include "base_url.h"
 #include "status.h"
 #include "speaker.h"
 #include "clip.h"
@@ -16,18 +17,6 @@ WebSocketsClient ws;
 bool g_started = false;
 bool g_connected = false;
 String g_channelName;
-
-// "https://api.commandagi.com" → "api.commandagi.com" (drop scheme, any path, any :port).
-String hostFromBase(const String& base) {
-  String h = base;
-  h.replace("https://", "");
-  h.replace("http://", "");
-  int slash = h.indexOf('/');
-  if (slash >= 0) h = h.substring(0, slash);
-  int colon = h.indexOf(':');
-  if (colon >= 0) h = h.substring(0, colon);
-  return h;
-}
 
 // A message larger than WEBSOCKETS_MAX_DATA_SIZE (15 kB in links2004/WebSockets 2.x, not overridable)
 // makes the library close the socket with 1009. So a base64 clip must keep the whole control message
@@ -244,19 +233,24 @@ void begin(const Creds& c) {
   g_channelName = "Camera";
   Speaker::setAuth(c.apiBaseUrl, c.apiKey);
 
-  const String host = hostFromBase(c.apiBaseUrl);
+  BaseUrl::Target target;
+  if (!BaseUrl::parse(c.apiBaseUrl.c_str(), target)) {
+    Serial.printf("[ws] the API base %s is not http(s)://host[:port]: no realtime socket\n", c.apiBaseUrl.c_str());
+    return;
+  }
   // Same realtime route the host-core runtime uses; token chars are URL-safe (base64url + '.').
   const String path = "/rt/run/" + c.sessionId + "?device=" + c.deviceId + "&runtime=1&role=agent&token=" + c.token;
 
-  // wss on 443. NOTE: like the HTTP path (g_tls.setInsecure), this rides Cloudflare's cert without
-  // pinning — arduinoWebSockets' ESP32 SSL client connects without a CA here; if a build enforces
-  // verification, switch to ws.beginSslWithCA(host, 443, path, ISRG_ROOT_X1). The token authenticates us.
-  ws.beginSSL(host.c_str(), 443, path.c_str());
+  // NOTE: like the HTTP path (g_tls.setInsecure), TLS here does not check the server's certificate:
+  // arduinoWebSockets' ESP32 SSL client connects without a CA. The token authenticates us; a build that
+  // enforces verification switches to ws.beginSslWithCA(host, port, path, <CA>).
+  if (target.tls) ws.beginSSL(target.host, target.port, path.c_str());
+  else ws.begin(target.host, target.port, path.c_str());
   ws.onEvent(onEvent);
   ws.setReconnectInterval(3000);          // auto-redial a dropped socket
   ws.enableHeartbeat(15000, 3000, 2);     // ping every 15s; drop after 2 missed pongs
   g_started = true;
-  Serial.printf("[ws] connecting wss://%s%s\n", host.c_str(), ("/rt/run/" + c.sessionId).c_str());
+  Serial.printf("[ws] connecting %s://%s:%u%s\n", target.tls ? "wss" : "ws", target.host, target.port, ("/rt/run/" + c.sessionId).c_str());
 }
 
 void loop() {
