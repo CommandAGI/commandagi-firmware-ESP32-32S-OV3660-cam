@@ -70,6 +70,7 @@ bool Stream::begin(const Config& cfg, seal_ctx* index, seal_ctx* media, char* in
   media_.out.buf = mediaOutbox;
   index_.out.cap = media_.out.cap = outboxCap;
   indexOutbox[0] = mediaOutbox[0] = 0;
+  cfg_ = cfg;
   index_.seq = cfg.firstSeq;
   media_.seq = cfg.firstMediaSeq;
   offset_ = 0;
@@ -133,6 +134,41 @@ bool Stream::Part::seal(const char* t, bool clockSet, const char* block, const c
 }
 
 bool Stream::pending() const { return index_.pending() || media_.pending(); }
+
+namespace {
+bool sealHash(const char* p) {
+  if (!p || strlen(p) != 64) return false;
+  for (const char* c = p; *c; c++)
+    if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f'))) return false;
+  return true;
+}
+}  // namespace
+
+void Stream::Part::reset(const Config& cfg, const FileState* file) {
+  char prev[65];
+  memcpy(prev, ctx->prev, sizeof prev);
+  const int announced = ctx->announced;
+  seal_init(ctx, cfg.alg, cfg.spki, cfg.spkiLen, cfg.announce, cfg.announceChain ? 1 : 0, "none", cfg.sign, cfg.signCtx);
+  if (file) {
+    // The file's last seal, which the recorder holds and this device may not (it rebooted, or its seal was
+    // lost): the next seal chains to it. The file may be new to this key, so the key is announced again.
+    if (sealHash(file->prev)) memcpy(ctx->prev, file->prev, 65);
+    if (file->seq + 1 > seq) seq = file->seq + 1;
+  } else {
+    memcpy(ctx->prev, prev, sizeof prev);
+    ctx->announced = announced;
+  }
+  out.len = 0;
+  out.buf[0] = 0;
+  clockUnset = false;
+}
+
+void Stream::resume(const FileState* index, const FileState* media, int64_t lastCounter) {
+  index_.reset(cfg_, index);
+  media_.reset(cfg_, media);
+  if (media) offset_ = media->bytes;
+  if (lastCounter >= 0 && (uint64_t)lastCounter + 1 > counter_) counter_ = (uint64_t)lastCounter + 1;
+}
 
 bool Stream::seal(const char* t, bool clockSet, const char* block, const char* status) {
   bool ok = true;

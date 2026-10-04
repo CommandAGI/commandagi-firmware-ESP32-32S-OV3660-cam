@@ -93,10 +93,13 @@ void reserve(const char* key, uint64_t next, uint64_t& limit, uint64_t block) {
 }
 
 // Each stream's lines go to its own channel: cam's seals to `cam`, the index and its seals to `cam-at`.
+// The index goes out only after the seal over its frames: the recorder then never keeps an index line
+// whose frame it refused (thread-run.ts resumes both streams when it refuses either).
 void flush() {
   if (!CloudWs::connected()) return;
   DeviceSeal::Outbox& m = g_stream.mediaOutbox();
   if (m.len && CloudWs::sendLines(CAGI_STREAM_CHANNEL, "camera", m.buf, m.len)) m.sent(m.len);
+  if (m.len) return;
   DeviceSeal::Outbox& i = g_stream.indexOutbox();
   if (i.len && CloudWs::sendLines(CAGI_SEAL_INDEX_CHANNEL, "events", i.buf, i.len)) i.sent(i.len);
 }
@@ -290,6 +293,44 @@ void loop(const Creds& c) {
 }
 
 String spki() { return g_ready ? String(g_spkiB64u) : String(); }
+
+bool onMessage(const uint8_t* payload, size_t len) {
+  static const char kType[] = "\"seal_resume\"";
+  if (!memmem(payload, len, kType, sizeof kType - 1)) return false;
+  JsonDocument msg;
+  if (deserializeJson(msg, payload, len) || strcmp(msg["type"] | "", "seal_resume")) return false;
+  if (!g_ready) return true;
+  // The hashes must outlive the JsonDocument's strings only until resume() copies them.
+  DeviceSeal::FileState index{}, media{};
+  bool hasIndex = false, hasMedia = false;
+  int64_t lastCounter = -1;
+  JsonDocument reply;
+  reply["type"] = "seal_resumed";
+  JsonArray ids = reply["channelIds"].to<JsonArray>();
+  for (JsonObjectConst x : msg["streams"].as<JsonArrayConst>()) {
+    const char* id = x["channelId"] | "";
+    DeviceSeal::FileState f{x["seq"] | (uint64_t)0, x["prev"].is<const char*>() ? x["prev"].as<const char*>() : nullptr,
+                            x["bytes"] | (uint64_t)0};
+    if (!strcmp(id, CAGI_SEAL_INDEX_CHANNEL)) {
+      index = f;
+      hasIndex = true;
+    } else if (!strcmp(id, CAGI_STREAM_CHANNEL)) {
+      media = f;
+      hasMedia = true;
+    } else {
+      continue;
+    }
+    if (x["counter"].is<int64_t>() && x["counter"].as<int64_t>() > lastCounter) lastCounter = x["counter"].as<int64_t>();
+    ids.add(id);
+  }
+  g_stream.resume(hasIndex ? &index : nullptr, hasMedia ? &media : nullptr, lastCounter);
+  reserveAll();
+  String out;
+  serializeJson(reply, out);
+  CloudWs::sendText(out);
+  Serial.printf("[seal] resumed where the recorder stands: %s\n", msg["reason"] | "");
+  return true;
+}
 
 }  // namespace Seal
 #endif

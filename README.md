@@ -315,7 +315,24 @@ when it was sent:
 
 A sealing build does not send bare binary frames (the platform does not record those). Each stream's
 lines wait in a 32 kB outbox until the socket takes them, once a second with the seals; while the index
-outbox is full, no frame is sent.
+outbox is full, no frame is sent. `cam-at`'s lines go out only after `cam`'s seal over their frames.
+
+**Resume.** The recorder keeps a group (the lines and frames since a seal, and the seal) only when it
+extends the file it holds; it cannot repair what the device signed. When it keeps none of a group (a
+frame lost after `sendTXT` returned), and whenever the socket connects, it says where its files stand:
+
+```json
+{"type":"seal_resume","reason":"…","streams":[
+  {"channelId":"cam","seq":1031,"prev":"<sha256 of the file's last seal line>","counter":2061,"file":"video.mjpeg","bytes":4718592},
+  {"channelId":"cam-at","seq":4130,"prev":"…","counter":2062}]}
+```
+
+The device drops everything not yet sealed and sent, from both streams (an index line names its frame's
+bytes), and continues after the files: the next seq after each file's last, the next seal chained to the
+file's last seal and announcing the key again, the frames at the file's length. Seqs and the counter
+never go back. It answers `{"type":"seal_resumed","channelIds":["cam","cam-at"]}` before it sends
+another frame; the recorder drops what comes before that. A reboot, a lost link or a lost frame is then a
+gap the files show (skipped seqs, a jump in time), and the seals still verify.
 
 **The certificate.** The factory certifies the key with CommandAGI's `scripts/integrity/device-ca.mjs`
 (`--key software --envelope none` for Cam-002). On the bench, before the unit has creds:
@@ -338,13 +355,8 @@ also carries the key (`sealKey`, base64url SPKI).
   encryption (an `nvs_keys` partition) so that the key in NVS is encrypted too. Flash encryption alone
   does not encrypt NVS. These burn eFuses and need the owner's signing key, so no env enables them; the
   seals say `flash: plain` until one does.
-- A reboot, or a frame lost after `sendTXT` returned, breaks the seal chain in the recorder's files: the
-  device starts its media offset at 0 and its `prev` at none after a reboot, while the recorder
-  continues the same `video.mjpeg` and `records.jsonl`. The verifier then reports the break; it does
-  not repair it.
-- The platform side (CommandAGI `docs/next.md` § integrity): its runtime ingress throttles the frames
-  it records and turns a `data` message into a line of its own, so it does not yet keep these frames
-  and lines byte for byte.
+- No unit has streamed to the deployed recorder. The host test runs this sealing code through a refused
+  second and a resume, and CommandAGI's recorder check (`checkSealGroup`) accepts every group it sent.
 
 ## Remote sensor control
 

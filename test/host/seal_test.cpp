@@ -1,5 +1,7 @@
 // Host test of the camera's sealed streams (src/device_seal.cpp over src/seal/seal.c): a camera sends
-// frames for three seconds and seals once a second. It prints `cam-at`'s records.jsonl on stdout, and
+// frames for three seconds and seals once a second. The recorder keeps none of a fourth second (a frame
+// was lost on the way) and says where its files stand (`seal_resume`); the camera resumes from there and
+// sends a fifth. It prints `cam-at`'s records.jsonl on stdout, and
 // writes `cam`'s video.mjpeg to argv[1] and its records.jsonl (its seals) to argv[2]. The CommandAGI
 // repository's tests/workbench/seal-c.test.mjs builds and runs it, and its JavaScript verifier
 // (packages/domain/world/seals.js verifySeals) must accept the files as they are. TweetNaCl stands in for libsodium's Ed25519 (the same signature scheme):
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 #include "device_seal.h"
 extern "C" {
@@ -57,6 +60,28 @@ void fail(const char* why) {
   fprintf(stderr, "FAIL %s\n", why);
   exit(1);
 }
+// The sha256 (hex) of the last line in `buf`: a seal, whose hash the next seal's prev names.
+std::string lastLineHash(const char* buf, size_t len) {
+  std::string text(buf, len);
+  while (!text.empty() && text.back() == '\n') text.pop_back();
+  const size_t at = text.rfind('\n');
+  const std::string line = at == std::string::npos ? text : text.substr(at + 1);
+  seal_sha256 h;
+  uint8_t d[32];
+  seal_sha256_init(&h);
+  seal_sha256_update(&h, (const uint8_t*)line.data(), line.size());
+  seal_sha256_final(&h, d);
+  char out[65];
+  for (int i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", d[i]);
+  return out;
+}
+// The seq of the last line in `buf`.
+uint64_t lastLineSeq(const char* buf, size_t len) {
+  std::string text(buf, len);
+  while (!text.empty() && text.back() == '\n') text.pop_back();
+  const size_t at = text.rfind("\"seq\":");
+  return at == std::string::npos ? 0 : strtoull(text.c_str() + at + 6, nullptr, 10);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -91,7 +116,11 @@ int main(int argc, char** argv) {
   const char* block = "{\"chain\":\"solana:devnet\",\"hash\":\"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin\",\"slot\":4242}";
   const char* status = "{\"boot\":\"unverified\",\"flash\":\"plain\",\"fw\":\"1.3.0\"}";
   std::vector<uint8_t> stamped;
-  for (int sec = 0; sec < 3; sec++) {
+  // What the recorder kept last of each stream: its last seal's hash and seq, and the media file's length.
+  std::string indexPrev, camPrev;
+  uint64_t indexSeq = 0, camSeq = 0, mediaBytes = 0;
+  for (int sec = 0; sec < 5; sec++) {
+    const bool refused = sec == 3;
     for (int k = 0; k < 4; k++) {
       char t[32];
       snprintf(t, sizeof t, "2026-10-03T12:00:%02d.%03dZ", sec, 100 + 200 * k);
@@ -103,13 +132,26 @@ int main(int argc, char** argv) {
       if (!s.room(n)) fail("no room");
       // The second frame of the first second is lost before it is sent: it is not indexed or sealed.
       if (sec == 0 && k == 1) continue;
-      fwrite(stamped.data(), 1, n, media);
+      if (!refused) {
+        fwrite(stamped.data(), 1, n, media);
+        mediaBytes += n;
+      }
       // The clock was not set yet during the first second.
       if (!s.frameSent(stamped.data(), n, t, sec > 0)) fail("frameSent");
     }
     char t[32];
     snprintf(t, sizeof t, "2026-10-03T12:00:%02d.950Z", sec);
     if (!s.seal(t, true, sec ? block : nullptr, status)) fail("seal");
+    if (refused) {
+      // The recorder refused cam's group: it keeps nothing more of either stream until the camera resumes.
+      const DeviceSeal::FileState ix{indexSeq, indexPrev.c_str(), 0}, mx{camSeq, camPrev.c_str(), mediaBytes};
+      const uint64_t seqBefore = s.nextSeq(), counterBefore = s.counter();
+      s.resume(&ix, &mx, 2053);
+      if (s.indexOutbox().len || s.mediaOutbox().len || s.pending()) fail("resume kept what the recorder dropped");
+      if (s.mediaOffset() != mediaBytes) fail("resume: the media offset is not the file's length");
+      if (s.nextSeq() != seqBefore || s.counter() != counterBefore) fail("resume took a seq or the counter back");
+      continue;
+    }
     // The index goes out in two parts in the last second, as a socket might take it.
     DeviceSeal::Outbox& ix = s.indexOutbox();
     if (sec == 2) {
@@ -118,17 +160,22 @@ int main(int argc, char** argv) {
       ix.sent(first);
     }
     fwrite(ix.buf, 1, ix.len, stdout);
+    indexPrev = lastLineHash(ix.buf, ix.len);
+    indexSeq = lastLineSeq(ix.buf, ix.len);
     ix.sent(ix.len);
     // The frames' seals wait one second while the socket is down.
     DeviceSeal::Outbox& mx = s.mediaOutbox();
     if (sec != 1) {
       fwrite(mx.buf, 1, mx.len, cam);
+      camPrev = lastLineHash(mx.buf, mx.len);
+      camSeq = lastLineSeq(mx.buf, mx.len);
       mx.sent(mx.len);
     }
   }
   fclose(media);
   fclose(cam);
   if (s.indexOutbox().len || s.mediaOutbox().len) fail("an outbox kept lines");
-  if (s.nextSeq() != 4097 + 11 + 3 || s.nextMediaSeq() != 1025 + 3 || s.counter() != 2048 + 6) fail("seq or counter");
+  // Five seconds of seqs, the refused one's skipped, never reused; two seals a second.
+  if (s.nextSeq() != 4097 + 19 + 5 || s.nextMediaSeq() != 1025 + 5 || s.counter() != 2048 + 10) fail("seq or counter");
   return 0;
 }

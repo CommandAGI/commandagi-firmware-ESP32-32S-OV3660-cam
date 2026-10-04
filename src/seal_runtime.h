@@ -22,6 +22,10 @@ bool sendFrame(const uint8_t* jpeg, size_t len);
 void loop(const Creds& c);
 // The key's SubjectPublicKeyInfo, base64url (empty when there is no key). BLE INFO carries it.
 String spki();
+// A text message from the socket. A `seal_resume` (the recorder did not keep what was sent, or the
+// socket is new) resets both streams to where the recorder's files stand and answers `seal_resumed`,
+// before any later frame goes out. True when the message was one.
+bool onMessage(const uint8_t* payload, size_t len);
 #endif
 
 }  // namespace Seal

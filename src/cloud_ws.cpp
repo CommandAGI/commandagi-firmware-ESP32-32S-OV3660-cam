@@ -8,6 +8,7 @@
 #if CAGI_DEVICE_SEALS
 #include <esp_heap_caps.h>
 #include "mbedtls/base64.h"
+#include "seal_runtime.h"
 #endif
 
 namespace {
@@ -209,9 +210,14 @@ void onEvent(WStype_t type, uint8_t* payload, size_t len) {
 #endif
       ::Status::set("streaming");
       break;
-#if CAGI_SPEAKER_ENABLED
+#if CAGI_SPEAKER_ENABLED || CAGI_DEVICE_SEALS
     case WStype_TEXT:
+#if CAGI_DEVICE_SEALS
+      if (Seal::onMessage(payload, len)) break;
+#endif
+#if CAGI_SPEAKER_ENABLED
       onText(payload, len);
+#endif
       break;
 #endif
     case WStype_DISCONNECTED:

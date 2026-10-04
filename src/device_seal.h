@@ -49,6 +49,14 @@ struct Outbox {
   bool append(const char* line, size_t n);
 };
 
+// Where the recorder's file of one stream stands (a `seal_resume`): its last seq, its last seal's sha256
+// (hex; null when the file has none), and for `cam` how many bytes video.mjpeg holds.
+struct FileState {
+  uint64_t seq;
+  const char* prev;
+  uint64_t bytes;
+};
+
 class Stream {
  public:
   // `index` and `media` are the two sealers' states (about 49 kB each at the default SEAL_MAX_*), the
@@ -64,6 +72,14 @@ class Stream {
 
   // Lines or media bytes wait for a seal.
   bool pending() const;
+
+  // The recorder did not keep what was sent (a frame lost on the way, a reboot, a reconnect) and says
+  // where its files stand. Everything not yet sealed and kept is dropped from both streams, because one
+  // describes the other (an index line names its frame's bytes): the pending leaves and both outboxes.
+  // A stream named continues after its file: its next seq after the file's last, its next seal chained
+  // to the file's last seal and announcing the key again, `cam`'s frames at the file's length. Seqs and
+  // the counter never go back. `lastCounter` < 0: the files have no seal yet.
+  void resume(const FileState* index, const FileState* media, int64_t lastCounter);
   // Seal each stream that has something pending: `cam` first, then `cam-at`. `block` is canonical JSON
   // or null; `status` a canonical JSON object or null. False when a seal that was due could not be made
   // (its outbox is full, or the key would not sign); what it would have covered stays pending.
@@ -79,6 +95,8 @@ class Stream {
  private:
   struct Part {
     seal_ctx* ctx = nullptr;
+    // Drop what is pending; with `file`, continue after it.
+    void reset(const Config& cfg, const FileState* file);
     Outbox out;
     uint64_t seq = 1;
     bool clockUnset = false;  // something since its last seal was stamped before the clock was set
@@ -86,6 +104,7 @@ class Stream {
     bool seal(const char* t, bool clockSet, const char* block, const char* status, uint64_t& counter);
   };
   Part index_, media_;
+  Config cfg_{};
   uint64_t offset_ = 0, counter_ = 0;
 };
 
