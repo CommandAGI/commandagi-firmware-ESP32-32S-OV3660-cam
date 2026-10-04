@@ -236,8 +236,36 @@
 #define CAGI_BATTERY_STAT_ACTIVE LOW
 #endif
 
-// How often (ms) the device sends a runtime `status` message with its link and battery while the
-// realtime socket is open (also on connect and on a link change). Cellular and battery builds only.
+// ── IR night mode (the DFR1154's IR LEDs and LTR-308 light sensor) ───────────────────────────────
+// OFF by default, so other builds do not change; on in [env:esp32cam-s3]. GPIO47 is the EN/PWM pin of
+// the board's SY7200A boost (U2), which drives four MHP3528IRCT-D 940 nm LEDs in series through R7 =
+// 6.8 ohm (DFR1154 Schematic v1.1; DFRobot's pin table: "IR: Infrared illumination (IO47)"). The light
+// sensor is an LTR-308ALS-01 at 0x53 on the camera's SCCB lines GPIO8/9 (DFRobot's pin table "ALS:
+// LTR-308"; DFRobot_LTR308 LTR308_ADDR 0x53, used by DFR1154_Examples 5.1). Auto mode: on below
+// CAGI_IR_ON_BELOW_LUX, off above CAGI_IR_OFF_ABOVE_LUX. README § IR night mode.
+#ifndef CAGI_IR_ENABLED
+#define CAGI_IR_ENABLED 0
+#endif
+#if CAGI_IR_ENABLED
+  #if !defined(CAM_BOARD_DFR_S3_AICAM)
+    #error "CAGI_IR_ENABLED: the IR pin and the light sensor are known only for the DFR1154 (CAM_BOARD_DFR_S3_AICAM)"
+  #endif
+  #define CAGI_IR_PIN        47
+  #define CAGI_ALS_I2C_ADDR  0x53
+  #ifndef CAGI_IR_ON_BELOW_LUX
+  #define CAGI_IR_ON_BELOW_LUX  5.0f
+  #endif
+  #ifndef CAGI_IR_OFF_ABOVE_LUX
+  #define CAGI_IR_OFF_ABOVE_LUX 15.0f
+  #endif
+  #ifndef CAGI_IR_READ_MS
+  #define CAGI_IR_READ_MS    2000
+  #endif
+#endif
+
+// How often (ms) the device sends a runtime `status` message with its link, battery and IR while the
+// realtime socket is open (also on connect, on a link change and on an IR change). Cellular, battery
+// and IR builds only.
 #define CAGI_RUNTIME_STATUS_MS 60000
 
 // ── Verified-camera SKU (multi-modal + tamper-evident) ──────────────────────────────────────────

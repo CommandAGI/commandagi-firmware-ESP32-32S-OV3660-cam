@@ -89,7 +89,7 @@ contract is shared with the apps in ``packages/domain/core/src/esp32cam.ts`` (pl
 | Characteristic | UUID suffix | Props         | Payload                                                                      |
 | -------------- | ----------- | ------------- | ---------------------------------------------------------------------------- |
 | INFO           | `…0002`     | read          | `{ kind, model, fw, hwid, name, provisioned, mic, spk?, secure, salt? }`     |
-| STATUS         | `…0003`     | read + notify | `{ state, ip?, sessionId?, deviceId?, error?, link?, operator?, rssi?, rsrp?, battery? }` |
+| STATUS         | `…0003`     | read + notify | `{ state, ip?, sessionId?, deviceId?, error?, link?, operator?, rssi?, rsrp?, battery?, ir? }` |
 | PROVISION      | `…0004`     | write         | PIN-sealed `{ ssid, psk, apiBaseUrl, apiKey, deviceName?, apn?, simPin? }` (see _Security_) |
 | COMMAND        | `…0005`     | write         | `identify` \| `reboot` \| `factory-reset`                                    |
 
@@ -98,7 +98,8 @@ contract is shared with the apps in ``packages/domain/core/src/esp32cam.ts`` (pl
 every sensor was turned off remotely (see _Remote sensor control_).
 
 `link`, `operator`, `rssi`, `rsrp` come only from cellular builds and `battery` (`{ mv, pct?, charging? }`)
-only from battery builds, so the STATUS of other builds does not change. `apn` and `simPin` are
+only from battery builds, and `ir` (`{ mode, on, lux?, night }`) only from IR builds, so the STATUS of other
+builds does not change. `apn` and `simPin` are
 optional: a payload without them stays valid, and the sealed format does not change. A cellular build
 accepts an empty `ssid` and then uses only the modem.
 
@@ -163,6 +164,44 @@ fuel gauge) and, with `-DCAGI_BATTERY_STAT_PIN`, whether it charges. It appears 
 (`battery`) and in the runtime `status` message. Below 2.5 V the firmware reports no battery: the Cam-002
 no-battery variant fits only the lower resistor, so it reads 0 V. Cam-002-battery: GPIO10, divider 2.
 The Cam-002 charger exposes no STAT pin, so `charging` is absent there.
+
+## IR night mode (`-DCAGI_IR_ENABLED=1`, DFR1154 only)
+
+The DFR1154 has four 940 nm IR LEDs and an ambient light sensor. The `esp32cam-s3` env (and so
+`esp32cam-s3-cellular` and both Cam-002 products) turns IR night mode on. Default is off (`0`); another
+board is a compile error, because its pins are not known.
+
+| part | pins | source |
+| --- | --- | --- |
+| IR LEDs: SY7200A boost (U2), four MHP3528IRCT-D in series, R7 = 6.8 Ω | EN/PWM on GPIO47 (`CAGI_IR_PIN`) | DFR1154 Schematic v1.1 (net `IR_CT`); DFRobot's pin table "IR: Infrared illumination (IO47)" |
+| light sensor LTR-308ALS-01 | I2C address `0x53` (part ID `0xB1`) on GPIO8/9, the camera's SCCB lines; INT on GPIO48 (not used) | DFRobot's pin table "ALS: LTR-308"; `DFRobot_LTR308` (`LTR308_ADDR 0x53`), used by `DFR1154_Examples` 5.1 |
+
+**Modes.** The operator's mode comes in the control state as `sensors.ir`: `"auto"`, `"on"` or `"off"`.
+A missing or unknown value is `auto`, so servers that send only `cam` and `mic` keep working. The device
+does not keep the mode over a reboot; it starts in `auto` until the server says otherwise.
+
+- `auto`: the firmware reads the light every 2 s (`CAGI_IR_READ_MS`). IR goes on below 5 lx
+  (`CAGI_IR_ON_BELOW_LUX`) and off above 15 lx (`CAGI_IR_OFF_ABOVE_LUX`); between the two the state does
+  not change. With no light reading, IR is off.
+- `on` / `off`: the operator's choice, whatever the light.
+- In every mode IR is off while the camera does not run: the operator turned the camera off, the device is
+  `paused`, the camera failed, or the loop is not streaming (no link, a retry, not provisioned).
+
+**Night tuning.** While IR is on the firmware sets the OV3660's night mode (`set_aec2`: register 0x3A00
+bit 2, a longer exposure in low light) and a grey image (`set_special_effect` 2). The lens passes 940 nm,
+so colours under IR are false. When IR goes off it sets both back. A camera re-init sets them again.
+
+**Reported state.** BLE STATUS and the realtime `{"type":"status",…}` message carry
+`"ir":{"mode":"auto","on":true,"lux":3.2,"night":true}`. `mode` is the operator's mode; `on` is the level
+the firmware drives on GPIO47, not proof that the LEDs emit; `lux` is the last reading (absent when there
+is none); `night` is true when the sensor accepted the night tuning. The socket message goes out at once
+when `mode`, `on` or `night` changes, and every 60 s. BLE STATUS notifies on those changes and when the
+light moves by more than 25 %.
+
+**Heat.** R7 sets the LED current. If the SY7200A regulates FB at 0.2 V (the usual value for this kind of
+boost LED driver; its datasheet was not read), the current is about 29 mA and each LED takes about
+40 mW. DFRobot gives 75 mW per LED at most. So the firmware sets no duty limit. Measure the current on a
+board.
 
 ## Microphone (optional INMP441)
 
@@ -278,7 +317,7 @@ The mic keeps recording. The main loop does not post a clip recorded while the s
 ## Remote sensor control
 
 While streaming, each frame/audio POST response carries the operator's desired sensor state
-(`{ sensors: { cam, mic } }`), so toggling a camera's cam/mic off in the dashboard stops that stream
+(`{ sensors: { cam, mic, ir? } }`), so toggling a camera's cam/mic off in the dashboard stops that stream
 within one interval. When every sensor is off the device goes `paused` and polls
 `GET /v1/streams/:sessionId/:deviceId/control` every few seconds, so it can be turned back on
 remotely (it never needs a power-cycle to resume).
@@ -324,13 +363,16 @@ src/
   speaker.*         speaker: I2S TX, fetch, decode, play, results (optional, S3 only)
   cellular.*        LTE modem: power, AT setup, PPP into lwIP (optional, cellular envs)
   battery.*         cell voltage / percent / charging (optional)
+  ir.*              IR night mode: GPIO47, the LTR-308, the night tuning (optional, DFR1154)
+  ir_policy.h       the IR decision with hysteresis (plain C++, host-tested)
   CMakeLists.txt    the ESP-IDF main component (cellular envs only)
   idf_component.yml esp32-camera from the ESP-IDF registry (cellular envs only)
 CMakeLists.txt      the ESP-IDF project file (cellular envs only)
 sdkconfig.defaults.*  Arduino's sdkconfig + PPP, per SoC (cellular envs only)
   clip.*            speaker clip decoder: WAV PCM16 / MP3 → mono PCM16 (plain C++, host-tested)
   third_party/      minimp3.h (CC0, github.com/lieff/minimp3 at ea99364f)
-test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++
+test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++;
+                    ir_policy_test.cpp: the IR decision against a light level that crosses the thresholds
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
 ```
@@ -359,3 +401,18 @@ g++ -std=c++17 -O1 -Wall -Isrc test/host/clip_test.cpp src/clip.cpp -o /tmp/clip
 This is compilation and a host test only. No board ran this firmware: the PDM mic, the capture task,
 the speaker, the WebSocket messages, the video rate with the mic on, the modem sequence, PPP, the
 `AT+CPSI?` RSRP field order and the battery reading are not verified on hardware.
+
+## Build verification (2026-10-04, branch `cellular`, IR night mode)
+
+PlatformIO 6.2.0 compiled `esp32cam`, `esp32cam-s3` and `esp32cam-s3-cellular`, and
+`esp32cam-s3-cellular` with the Cam-002 flags (`-DCAGI_AUDIO_ENABLED=1 -DCAGI_SPEAKER_ENABLED=1
+-DCAGI_BATTERY_ADC_PIN=10`). Flash use before → after: `esp32cam` 1,325,457 → 1,325,457 bytes (the same
+`firmware.bin`, 1,332,032 bytes: IR is compiled out); `esp32cam-s3` 1,178,761 → 1,184,981; `esp32cam-s3-cellular`
+1,234,249 → 1,237,809. The host test passed:
+
+```sh
+g++ -std=c++17 -O1 -Wall -Isrc test/host/ir_policy_test.cpp -o /tmp/ir_policy_test && /tmp/ir_policy_test
+```
+
+This is compilation and a host test only. No board ran it: the LTR-308 reads on the shared SCCB port, the
+lux values, GPIO47 driving the LEDs, the LED current and the OV3660 night tuning are not verified.

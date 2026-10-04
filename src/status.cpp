@@ -51,6 +51,28 @@ void setBattery(int mv, int pct, int charging) {
   emit();
 }
 
+#if CAGI_IR_ENABLED
+void setIr(const char* mode, bool on, float lux, bool night) {
+  const bool same = g_snap.irMode == mode && g_snap.irOn == on && g_snap.irNight == night;
+  // Each STATUS change is a BLE notification; the light is read every 2 s and moves a little each time.
+  const float was = g_snap.irLux;
+  const bool luxMoved = (was < 0) != (lux < 0) || fabsf(lux - was) > 0.25f * fmaxf(was, 4.0f);
+  if (same && !luxMoved) return;
+  g_snap.irMode = mode;
+  g_snap.irOn = on;
+  g_snap.irLux = lux;
+  g_snap.irNight = night;
+  emit();
+}
+
+void irJson(const Snapshot& s, JsonObject out) {
+  out["mode"] = s.irMode;
+  out["on"] = s.irOn;
+  if (s.irLux >= 0) out["lux"] = roundf(s.irLux * 10) / 10;
+  out["night"] = s.irNight;
+}
+#endif
+
 Snapshot get() { return g_snap; }
 
 String toJson() {
@@ -70,6 +92,9 @@ String toJson() {
     if (g_snap.batPct >= 0) b["pct"] = g_snap.batPct;
     if (g_snap.charging >= 0) b["charging"] = g_snap.charging == 1;
   }
+#if CAGI_IR_ENABLED
+  if (g_snap.irMode.length()) irJson(g_snap, doc["ir"].to<JsonObject>());
+#endif
   String out;
   serializeJson(doc, out);
   return out;
