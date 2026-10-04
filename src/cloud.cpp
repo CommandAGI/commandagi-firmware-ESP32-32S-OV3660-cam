@@ -210,36 +210,27 @@ bool pollControl(const Creds& c, Control* ctl) {
   return true;
 }
 
-bool chainBlock(const Creds& c, String& out) {
+bool logHead(const Creds& c, String& out) {
   ensureTls();
   HTTPClient http;
   http.setReuse(true);
   http.setTimeout(3000);  // the frame loop waits for this call
-  if (!http.begin(g_tls, c.apiBaseUrl + "/public/chain/block")) return false;
+  if (!http.begin(g_tls, c.apiBaseUrl + "/public/contract/head")) return false;
   const int code = http.GET();
   const String body = code == 200 ? http.getString() : "";
   http.end();
   if (code != 200) return false;
   JsonDocument d;
   if (deserializeJson(d, body)) return false;
-  const char* chain = d["chain"] | "";
+  if (!d["seq"].is<uint64_t>()) return false;
+  const uint64_t seq = d["seq"].as<uint64_t>();
   const char* hash = d["hash"] | "";
-  if (!d["slot"].is<uint64_t>()) return false;
-  const uint64_t slot = d["slot"].as<uint64_t>();
-  // The seal embeds these as they are, so only the characters the format allows: <family>:<network>
-  // (seals.js BLOCK) and a base58 hash.
-  auto only = [](const char* s, const char* allowed) {
-    if (!*s || strlen(s) > 96) return false;
-    for (; *s; s++)
-      if (!strchr(allowed, *s)) return false;
-    return true;
-  };
-  const char* colon = strchr(chain, ':');
-  if (!colon || colon == chain || !colon[1] || !only(chain, "abcdefghijklmnopqrstuvwxyz0123456789:-") || strchr(colon + 1, ':') ||
-      memchr(chain, '-', colon - chain) || !only(hash, "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"))
-    return false;
-  char buf[256];
-  snprintf(buf, sizeof buf, "{\"chain\":\"%s\",\"hash\":\"%s\",\"slot\":%llu}", chain, hash, (unsigned long long)slot);
+  // The seal embeds it as it is, so only what the format allows: a positive seq and 64 lowercase hex (seals.js).
+  if (seq < 1 || strlen(hash) != 64) return false;
+  for (const char* x = hash; *x; x++)
+    if (!((*x >= '0' && *x <= '9') || (*x >= 'a' && *x <= 'f'))) return false;
+  char buf[128];
+  snprintf(buf, sizeof buf, "{\"head\":\"%s\",\"seq\":%llu}", hash, (unsigned long long)seq);
   out = buf;
   return true;
 }

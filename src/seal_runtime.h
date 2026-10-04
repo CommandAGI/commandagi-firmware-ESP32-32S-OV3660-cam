@@ -17,14 +17,19 @@ void begin();
 void serial();
 // Stamp a captured JPEG, send it on the realtime socket, and index it. False: it was not sent.
 bool sendFrame(const uint8_t* jpeg, size_t len);
-// Once a second: seal what is pending, and send the index and seal lines. Every 10 s: fetch a recent
-// block. Call every loop while registered.
+// Once a second: seal what is pending, and send the index and seal lines. Every 10 s: fetch the
+// contract log's head, which every seal names. Call every loop while registered.
 void loop(const Creds& c);
+// Answer a frame request the socket brought (onMessage), if one waits: capture a frame now, send it,
+// seal both streams at once and send their lines, then answer `frame_sealed` with cam's seal. `cameraOn`
+// false (no sensor, or the operator turned it off): answer that it did not capture. Call every loop.
+void serveFrameRequest(bool cameraOn);
 // The key's SubjectPublicKeyInfo, base64url (empty when there is no key). BLE INFO carries it.
 String spki();
 // A text message from the socket. A `seal_resume` (the recorder did not keep what was sent, or the
 // socket is new) resets both streams to where the recorder's files stand and answers `seal_resumed`,
-// before any later frame goes out. True when the message was one.
+// before any later frame goes out. A `frame_request` waits for serveFrameRequest (a camera is not read
+// inside the socket's callback). True when the message was one of these.
 bool onMessage(const uint8_t* payload, size_t len);
 #endif
 

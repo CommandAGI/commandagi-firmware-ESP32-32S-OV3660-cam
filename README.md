@@ -357,8 +357,11 @@ the key. None of it says what the sensor saw.
 
 About once a second each stream gets a seal line in its own `records.jsonl`: `cam`'s covers the
 `video.mjpeg` bytes since its last seal, `cam-at`'s the index lines since its last seal (RFC 9162 Merkle
-roots, 64 KiB media chunks). One key signs both, and one counter numbers both. A seal names a recent block, fetched from
-`GET <api>/public/chain/block` every 10 s, so the frames after it were made after that block. Its
+roots, 64 KiB media chunks). One key signs both, and one counter numbers both. A seal names the
+contract log's head, `"log":{"head":"<64 hex>","seq":N}`, fetched from `GET <api>/public/contract/head`
+every 10 s. Once a minute the platform appends a recent block of its chain to that log (a beacon), and
+every later head hashes it, so the frames after the seal were made after that block. The device reads no
+chain: one chain read a minute serves every device. Its
 `clock` is `ntp` when SNTP set the clock before every frame it covers, else `none`. The first seal of
 each stream after a boot announces the key: the factory's certificate chain when the unit has one, else
 the bare key (`spki`). Seqs and seal counters never go back, also across a reboot: the device reserves
@@ -393,6 +396,28 @@ file's last seal and announcing the key again, the frames at the file's length. 
 never go back. It answers `{"type":"seal_resumed","channelIds":["cam","cam-at"]}` before it sends
 another frame; the recorder drops what comes before that. A reboot, a lost link or a lost frame is then a
 gap the files show (skipped seqs, a jump in time), and the seals still verify.
+
+**A frame on demand.** A principal with a standing grant (`open` on the unit's `cam`) asks the platform
+for a frame now. The platform records the request, then sends:
+
+```json
+{"type":"frame_request","channelId":"cam","requestId":"fr-…","expedite":false}
+```
+
+The device takes one request at a time (`Seal::onMessage` keeps it; the main loop serves it in
+`Seal::serveFrameRequest`, not inside the socket's callback). It captures a frame at once, sends it and
+its index line, seals both streams at once (not at the next second), sends the seal lines, and then
+answers with `cam`'s seal over the frame, its seq and the sha256 of its line:
+
+```json
+{"type":"frame_sealed","requestId":"fr-…","channelId":"cam","seq":1032,"hash":"<64 hex>"}
+```
+
+When it does not capture, it says why instead: `{"type":"frame_sealed","requestId","channelId","refused":"the
+camera is off"}` (also: the sensor returned no frame, the socket did not take the frame, the seal lines did
+not go out yet, another request is waiting, the channel is not `cam`). The recorder checks that the seal
+the answer names is one it kept. `expedite` asks the platform to anchor the seals on chain at once; the
+device does nothing else for it. `DeviceSeal::frameAnswer` writes the answer; the host test checks it.
 
 **The certificate.** The factory certifies the key with CommandAGI's `scripts/integrity/device-ca.mjs`
 (`--key software --envelope none`, and `--lock none` or `efuse` for Cam-002). CommandAGI's
@@ -430,7 +455,9 @@ python3 tools/seal-provision.py pin    /dev/ttyACM0 482913
 
 **Not done.**
 
-- No board ran it. The host test (`test/host/seal_test.cpp`) and the builds are all that was checked.
+- No board ran it. The host test (`test/host/seal_test.cpp`: the streams, a refused second, a resume and a
+  frame request with its answer) and the builds are all that was checked. No unit answered a real
+  `frame_request` from the deployed platform.
 - The production lock has not run on a board: no eFuse was burned. The builds compile and are signed with a
   throwaway key pair, and the factory script runs against a fake board only.
 - No over-the-air update: a locked unit cannot be updated until the firmware has one (it must verify the
@@ -577,3 +604,12 @@ of flash, `esp32cam` with `-DCAGI_DEVICE_SEALS=1` 1,471,661, `esp32cam-s3` 1,185
 `test/host/ir_policy_test.cpp` passed, and CommandAGI's `tests/workbench/seal-c.test.mjs` passed over
 `test/host/seal_test.cpp`, whose seals now carry a dev unit's status and a locked unit's; with the status keys out of
 order, the test fails. No board ran it, and no eFuse was burned.
+
+## Build verification (2026-10-04, branch `beacon-frames`: the log head and the frame request)
+
+PlatformIO 6.2.0 compiled every env: `esp32cam` 1,325,649 bytes of flash (unchanged: the seals are compiled out),
+`esp32cam-s3` 1,185,173, `esp32cam-s3-seals` 1,329,433, `esp32cam-cellular` 1,384,077, `esp32cam-s3-cellular`
+1,238,005, and `hardware/CommandAGI-Cam-002/firmware`'s `commandagi-cam-002` 1,429,393 and
+`commandagi-cam-002-battery` 1,440,189. CommandAGI's `tests/workbench/seal-c.test.mjs` passed over
+`test/host/seal_test.cpp`: the seals name the log's head, and the frame request's answer names the seal over its
+frame, which verifies in JavaScript. No board ran it.

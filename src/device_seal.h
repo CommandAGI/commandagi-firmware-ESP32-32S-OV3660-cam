@@ -9,7 +9,10 @@
 //   - `cam-at`: one line per frame sent, {"t","seq","src":"device","kind":"event","frame":{offset,length,
 //     sha256}}, naming the frame's bytes in cam's video.mjpeg, and the seals over those lines.
 // About once a second each stream gets a seal. The lines of each go out in order through its outbox; the
-// recorder keeps them byte for byte. The seal counter is one counter for both: it always increases.
+// recorder keeps them byte for byte. The seal counter is one counter for both: it always increases. Each
+// seal names the contract log's head (`log`), so it was made after the block the head descends from.
+// A frame request (`frame_request`, README § Sealed stream) seals both streams at once, not at the next
+// second, and is answered with cam's seal over the frame (frameAnswer).
 #include <stddef.h>
 #include <stdint.h>
 extern "C" {
@@ -33,6 +36,14 @@ struct Config {
   uint64_t firstMediaSeq; // the first `cam` seal's seq
   uint64_t counter;       // the next seal's counter
 };
+
+// The answer to a frame request, one JSON line without a newline (frame-requests.js parseFrameSealed):
+// {"type":"frame_sealed","requestId","channelId","seq","hash"} for cam's seal over the frame, or, with
+// `refused` set, {"type":"frame_sealed","requestId","channelId","refused"}. Returns its length, or 0 when
+// an id is not [A-Za-z0-9._:-]{1,96}, `refused` holds a quote, a backslash or a control character, or
+// `out` is too small.
+size_t frameAnswer(char* out, size_t cap, const char* requestId, const char* channelId, uint64_t seq, const char* hash,
+                   const char* refused);
 
 // The bytes a stamp adds to a frame: FF FE, a 2-byte length, "t=", the time.
 size_t stampOverhead(const char* t);
@@ -80,10 +91,13 @@ class Stream {
   // to the file's last seal and announcing the key again, `cam`'s frames at the file's length. Seqs and
   // the counter never go back. `lastCounter` < 0: the files have no seal yet.
   void resume(const FileState* index, const FileState* media, int64_t lastCounter);
-  // Seal each stream that has something pending: `cam` first, then `cam-at`. `block` is canonical JSON
-  // or null; `status` a canonical JSON object or null. False when a seal that was due could not be made
-  // (its outbox is full, or the key would not sign); what it would have covered stays pending.
-  bool seal(const char* t, bool clockSet, const char* block, const char* status);
+  // Seal each stream that has something pending: `cam` first, then `cam-at`. `log` is the contract log's
+  // head as canonical JSON ({"head","seq"}) or null; `status` a canonical JSON object or null. False when a
+  // seal that was due could not be made (its outbox is full, or the key would not sign); what it would have
+  // covered stays pending.
+  bool seal(const char* t, bool clockSet, const char* log, const char* status);
+  // cam's last seal: its seq and the sha256 (hex) of its line. False before the first.
+  bool lastMediaSeal(uint64_t& seq, const char*& hash) const;
 
   Outbox& indexOutbox() { return index_.out; }
   Outbox& mediaOutbox() { return media_.out; }
@@ -101,7 +115,7 @@ class Stream {
     uint64_t seq = 1;
     bool clockUnset = false;  // something since its last seal was stamped before the clock was set
     bool pending() const;
-    bool seal(const char* t, bool clockSet, const char* block, const char* status, uint64_t& counter);
+    bool seal(const char* t, bool clockSet, const char* log, const char* status, uint64_t& counter);
   };
   Part index_, media_;
   Config cfg_{};

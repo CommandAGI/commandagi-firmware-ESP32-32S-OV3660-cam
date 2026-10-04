@@ -1,15 +1,16 @@
 // Host test of the camera's sealed streams (src/device_seal.cpp over src/seal/seal.c): a camera sends
 // frames for three seconds and seals once a second. The recorder keeps none of a fourth second (a frame
 // was lost on the way) and says where its files stand (`seal_resume`); the camera resumes from there and
-// sends a fifth. It prints `cam-at`'s records.jsonl on stdout, and
-// writes `cam`'s video.mjpeg to argv[1] and its records.jsonl (its seals) to argv[2]. The CommandAGI
+// sends a fifth. Then a frame request comes: one frame, sealed at once, and the answer that names its seal.
+// It prints `cam-at`'s records.jsonl on stdout, and writes `cam`'s video.mjpeg to argv[1], its
+// records.jsonl (its seals) to argv[2] and the frame request's answer to argv[3]. The CommandAGI
 // repository's tests/workbench/seal-c.test.mjs builds and runs it, and its JavaScript verifier
 // (packages/domain/world/seals.js verifySeals) must accept the files as they are. TweetNaCl stands in for libsodium's Ed25519 (the same signature scheme):
 //
 //   cc -O2 -c -I<seal-c>/test <seal-c>/test/tweetnacl.c -o /tmp/tweetnacl.o
 //   cc -O2 -c src/seal/seal.c -o /tmp/seal.o
 //   g++ -std=c++11 -O2 -Wall -Werror -Isrc -I<seal-c>/test test/host/seal_test.cpp src/device_seal.cpp
-//       /tmp/seal.o /tmp/tweetnacl.o -o /tmp/seal_test && /tmp/seal_test /tmp/video.mjpeg /tmp/cam.jsonl
+//       /tmp/seal.o /tmp/tweetnacl.o -o /tmp/seal_test && /tmp/seal_test /tmp/video.mjpeg /tmp/cam.jsonl /tmp/answer.json
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,7 +87,7 @@ uint64_t lastLineSeq(const char* buf, size_t len) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3) return 2;
+  if (argc < 4) return 2;
   unsigned char pk[32];
   crypto_sign_keypair(pk, g_sk);
   uint8_t spki[44] = {0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
@@ -114,7 +115,7 @@ int main(int argc, char** argv) {
   FILE* media = fopen(argv[1], "wb");
   FILE* cam = fopen(argv[2], "wb");
   if (!media || !cam) return 2;
-  const char* block = "{\"chain\":\"solana:devnet\",\"hash\":\"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin\",\"slot\":4242}";
+  const char* log = "{\"head\":\"5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9\",\"seq\":42}";
   // A dev unit's status (nothing locked), then a locked unit's: each verifies as the seal's own field.
   using ChipLockStatus::Download;
   using ChipLockStatus::Flash;
@@ -149,7 +150,7 @@ int main(int argc, char** argv) {
     }
     char t[32];
     snprintf(t, sizeof t, "2026-10-03T12:00:%02d.950Z", sec);
-    if (!s.seal(t, true, sec ? block : nullptr, sec < 3 ? devStatus : lockedStatus)) fail("seal");
+    if (!s.seal(t, true, sec ? log : nullptr, sec < 3 ? devStatus : lockedStatus)) fail("seal");
     if (refused) {
       // The recorder refused cam's group: it keeps nothing more of either stream until the camera resumes.
       const DeviceSeal::FileState ix{indexSeq, indexPrev.c_str(), 0}, mx{camSeq, camPrev.c_str(), mediaBytes};
@@ -180,10 +181,40 @@ int main(int argc, char** argv) {
       mx.sent(mx.len);
     }
   }
+  // A frame request: one frame now, both streams sealed at once (not at the next second), and the answer
+  // names cam's seal over it. The seal lines go out before the answer.
+  {
+    const char* t = "2026-10-03T12:00:04.990Z";
+    const std::vector<uint8_t> f = jpeg(12345, 99);
+    stamped.resize(f.size() + DeviceSeal::stampOverhead(t));
+    const size_t n = DeviceSeal::stamp(f.data(), f.size(), t, stamped.data(), stamped.size());
+    if (!s.frameSent(stamped.data(), n, t, true)) fail("frame request: frameSent");
+    fwrite(stamped.data(), 1, n, media);
+    if (!s.seal("2026-10-03T12:00:04.995Z", true, log, status)) fail("frame request: seal");
+    fwrite(s.mediaOutbox().buf, 1, s.mediaOutbox().len, cam);
+    s.mediaOutbox().sent(s.mediaOutbox().len);
+    fwrite(s.indexOutbox().buf, 1, s.indexOutbox().len, stdout);
+    s.indexOutbox().sent(s.indexOutbox().len);
+    uint64_t seq = 0;
+    const char* hash = nullptr;
+    if (!s.lastMediaSeal(seq, hash)) fail("frame request: no seal");
+    char answer[320];
+    const size_t a = DeviceSeal::frameAnswer(answer, sizeof answer, "fr-42", "cam", seq, hash, nullptr);
+    FILE* out = fopen(argv[3], "wb");
+    if (!a || !out) fail("frame request: answer");
+    fwrite(answer, 1, a, out);
+    fclose(out);
+    // What the answer refuses to carry: an id outside the wire's alphabet, a reason that would break the JSON.
+    if (DeviceSeal::frameAnswer(answer, sizeof answer, "fr\"x", "cam", seq, hash, nullptr)) fail("answered a bad id");
+    if (DeviceSeal::frameAnswer(answer, sizeof answer, "fr-1", "cam", 0, nullptr, "a \"quote\"")) fail("answered a bad reason");
+    if (!DeviceSeal::frameAnswer(answer, sizeof answer, "fr-1", "cam", 0, nullptr, "the camera is off") ||
+        strcmp(answer, "{\"type\":\"frame_sealed\",\"requestId\":\"fr-1\",\"channelId\":\"cam\",\"refused\":\"the camera is off\"}"))
+      fail("refusal");
+  }
   fclose(media);
   fclose(cam);
   if (s.indexOutbox().len || s.mediaOutbox().len) fail("an outbox kept lines");
-  // Five seconds of seqs, the refused one's skipped, never reused; two seals a second.
-  if (s.nextSeq() != 4097 + 19 + 5 || s.nextMediaSeq() != 1025 + 5 || s.counter() != 2048 + 10) fail("seq or counter");
+  // Five seconds and a frame request of seqs, the refused second's skipped, never reused; two seals each.
+  if (s.nextSeq() != 4097 + 20 + 6 || s.nextMediaSeq() != 1025 + 6 || s.counter() != 2048 + 12) fail("seq or counter");
   return 0;
 }

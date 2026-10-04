@@ -80,7 +80,7 @@ int seal_media(seal_ctx *c, const char *file, uint64_t offset, const uint8_t *b,
   return 0;
 }
 /* The canonical record (keys sorted); with sig when `sig` is set. */
-static int compose(seal_ctx *c, char *out, size_t cap, const char *t, uint64_t seq, const char *block_json, const char *status_json, const char *rootx, const char *mediax, const char *sig) {
+static int compose(seal_ctx *c, char *out, size_t cap, const char *t, uint64_t seq, const char *block_json, const char *log_json, const char *status_json, const char *rootx, const char *mediax, const char *sig) {
   char prev[80]; if (c->prev[0]) snprintf(prev, sizeof prev, "\"%s\"", c->prev); else snprintf(prev, sizeof prev, "null");
   uint64_t from = c->n ? c->first_seq : seq, to = c->n ? c->first_seq + c->n - 1 : seq - 1;
   char ann[16] = "";
@@ -88,8 +88,9 @@ static int compose(seal_ctx *c, char *out, size_t cap, const char *t, uint64_t s
                    !c->announced && c->announce && c->announce_chain ? ",\"chain\":" : "");
   if (n < 0 || (size_t)n >= cap) return -1;
   (void)ann;
-  int m = snprintf(out + n, cap - n, "%s,\"clock\":\"%s\",\"counter\":%llu,\"from\":%llu,\"key\":\"%s\"%s,\"prev\":%s,\"root\":\"%s\"%s%s%s%s%s%s%s,\"to\":%llu},\"seq\":%llu,\"src\":\"device\",\"t\":\"%s\"}",
-                   !c->announced && c->announce && c->announce_chain ? c->announce : "", c->clock, (unsigned long long)c->counter, (unsigned long long)from, c->key, mediax, prev, rootx,
+  int m = snprintf(out + n, cap - n, "%s,\"clock\":\"%s\",\"counter\":%llu,\"from\":%llu,\"key\":\"%s\"%s%s%s,\"prev\":%s,\"root\":\"%s\"%s%s%s%s%s%s%s,\"to\":%llu},\"seq\":%llu,\"src\":\"device\",\"t\":\"%s\"}",
+                   !c->announced && c->announce && c->announce_chain ? c->announce : "", c->clock, (unsigned long long)c->counter, (unsigned long long)from, c->key,
+                   log_json ? ",\"log\":" : "", log_json ? log_json : "", mediax, prev, rootx,
                    sig ? ",\"sig\":\"" : "", sig ? sig : "", sig ? "\"" : "",
                    !c->announced && c->announce && !c->announce_chain ? ",\"spki\":\"" : "", !c->announced && c->announce && !c->announce_chain ? c->announce : "", !c->announced && c->announce && !c->announce_chain ? "\"" : "",
                    status_json ? "" : "", (unsigned long long)to, (unsigned long long)seq, t);
@@ -117,7 +118,7 @@ static void b64u(const uint8_t *b, size_t n, char *out) {
   }
   out[o] = 0;
 }
-int seal_emit(seal_ctx *c, const char *t, uint64_t seq, const char *block_json, const char *status_json, char *out, size_t cap) {
+int seal_emit(seal_ctx *c, const char *t, uint64_t seq, const char *block_json, const char *log_json, const char *status_json, char *out, size_t cap) {
   uint8_t r[32]; char rootx[65], mediax[256] = "";
   root(c->leaves, c->n, r); hexof(r, 32, rootx);
   if (c->media_file[0] && c->media_to > c->media_from) {
@@ -129,13 +130,13 @@ int seal_emit(seal_ctx *c, const char *t, uint64_t seq, const char *block_json, 
   static const char domain[] = "commandagi.seal\n";
   size_t dl = sizeof domain - 1;
   if (cap < dl + 1) return -1;
-  int n = compose(c, out + dl, cap - dl, t, seq, block_json, status_json, rootx, mediax, NULL);
+  int n = compose(c, out + dl, cap - dl, t, seq, block_json, log_json, status_json, rootx, mediax, NULL);
   if (n < 0) return -1;
   memcpy(out, domain, dl);
   uint8_t sig[64]; char sigx[90];
   if (c->sign(c->sign_ctx, (const uint8_t *)out, dl + (size_t)n, sig)) return -1;
   b64u(sig, 64, sigx);
-  n = compose(c, out, cap, t, seq, block_json, status_json, rootx, mediax, sigx);
+  n = compose(c, out, cap, t, seq, block_json, log_json, status_json, rootx, mediax, sigx);
   if (n < 0) return -1;
   uint8_t h[32]; sha((const uint8_t *)out, (size_t)n, h); hexof(h, 32, c->prev);
   c->counter++; c->announced = 1; c->n = 0;
