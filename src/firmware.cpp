@@ -24,6 +24,9 @@
 #include "cloud_ws.h"
 #include "ble_prov.h"
 #include "seal_runtime.h"
+#if CAGI_IR_ENABLED
+#include "ir.h"
+#endif
 
 namespace {
 Creds g_creds;
@@ -44,7 +47,7 @@ uint32_t g_retryAt = 0;
 uint32_t g_lastStreamOkMs = 0;  // last time a frame went out — gates BLE stop/revive (radio sharing)
 uint32_t g_wsStartedAt = 0;     // when we opened the frame WebSocket — re-register if it won't connect
 uint32_t g_captureFails = 0;  // consecutive Camera::capture() failures (for surfacing + sensor recovery)
-#define CAGI_RUNTIME_STATUS (CAGI_CELLULAR_ENABLED || CAGI_BATTERY_ADC_PIN >= 0)
+#define CAGI_RUNTIME_STATUS (CAGI_CELLULAR_ENABLED || CAGI_BATTERY_ADC_PIN >= 0 || CAGI_IR_ENABLED)
 #if CAGI_CELLULAR_ENABLED
 // Frame interval floor while the link is cellular (server: `cellularIntervalMs`).
 uint32_t g_cellIntervalMs = CAGI_CELLULAR_INTERVAL_MS;
@@ -60,6 +63,11 @@ bool g_wsWasConnected = false;
 #if CAGI_BATTERY_ADC_PIN >= 0
 uint32_t g_nextBattery = 0;
 #endif
+#if CAGI_IR_ENABLED
+// The camera ran in the previous pass of the loop. Each pass clears it and only the streaming path sets
+// it again, so any pass that returns early (no link, retry, paused) turns IR off on the next pass.
+bool g_camRunning = false;
+#endif
 
 void reloadCreds() { g_creds = Store::load(); }
 
@@ -68,6 +76,9 @@ void applyControl(const Cloud::Control& ctl) {
   if (!ctl.valid) return;
   g_camDesired = ctl.cam;
   g_micDesired = ctl.mic;
+#if CAGI_IR_ENABLED
+  Ir::setMode(ctl.ir);
+#endif
   // Adopt the server-desired frame cadence (clamped to a sane device range). 0 = no opinion.
   if (ctl.intervalMs > 0) {
     uint32_t want = ctl.intervalMs < CAGI_FRAME_INTERVAL_MIN_MS ? CAGI_FRAME_INTERVAL_MIN_MS
@@ -135,7 +146,7 @@ bool linkReady(uint32_t now) {
 #endif
 
 #if CAGI_RUNTIME_STATUS
-// The runtime `status` message: `status: "live"` (what host-core sends) plus the link and battery
+// The runtime `status` message: `status: "live"` (what host-core sends) plus the link, battery and IR
 // fields. The platform ignores fields it does not know.
 void sendRuntimeStatus() {
   const Status::Snapshot st = Status::get();
@@ -155,6 +166,9 @@ void sendRuntimeStatus() {
     if (st.batPct >= 0) b["pct"] = st.batPct;
     if (st.charging >= 0) b["charging"] = st.charging == 1;
   }
+#if CAGI_IR_ENABLED
+  if (st.irMode.length()) Status::irJson(st, d["ir"].to<JsonObject>());
+#endif
   String out;
   serializeJson(d, out);
   CloudWs::sendText(out);
@@ -208,6 +222,9 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   Serial.println("\n[boot] CommandAGI ESP32-CAM " CAGI_FW_VERSION);
+#if CAGI_IR_ENABLED
+  Ir::begin();
+#endif
 
   Store::begin();
   Status::set("idle");
@@ -282,6 +299,16 @@ void loop() {
 #ifdef CAGI_CAMTEST
   delay(1000);  // diagnostic build: the probe ran once in setup(); nothing else to do
   return;
+#endif
+#if CAGI_IR_ENABLED
+  {
+    // Before any early return: IR follows the camera on every pass, provisioned or not.
+    const bool changed = Ir::service(millis(), g_camRunning, g_cameraOk);
+    g_camRunning = false;
+    const Ir::State ir = Ir::state();
+    Status::setIr(IrPolicy::modeName(ir.mode), ir.on, ir.lux, ir.night);
+    if (changed) g_nextRuntimeStatus = 0;  // the socket hears an IR change at once
+  }
 #endif
 #if CAGI_DEVICE_SEALS
   Seal::serial();  // the factory reads the key and stores its certificate chain here, before any creds
@@ -377,6 +404,9 @@ void loop() {
   const bool camActive = g_cameraOk && g_camDesired;
   const bool micActive = g_audioOk && g_micDesired;
   Audio::setEnabled(micActive);
+#if CAGI_IR_ENABLED
+  g_camRunning = camActive;
+#endif
 
   // Nothing to stream (no sensors, or the operator turned them all off): stay online; control poll above
   // already runs so a stopped camera can be remotely turned back on.
@@ -415,6 +445,9 @@ void loop() {
       if (g_captureFails % 15 == 0) {
         Serial.println("[cam] reinitializing sensor");
         g_cameraOk = Camera::reinit();
+#if CAGI_IR_ENABLED
+        Ir::cameraReset();
+#endif
         if (!g_cameraOk) { Status::set("camera_error", "sensor re-init failed"); return; }
       }
     }

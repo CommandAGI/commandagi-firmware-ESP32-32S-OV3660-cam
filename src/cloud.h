@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 #include "store.h"
+#include "config.h"
+#include "ir_policy.h"
 
 namespace Cloud {
 // Desired sensor state the server hands back to the device — which streams the operator wants ON.
@@ -13,6 +15,10 @@ struct Control {
   unsigned long intervalMs = 0;
   /** Server-desired frame interval floor on cellular (ms); 0 = no opinion. Cellular builds only. */
   unsigned long cellularIntervalMs = 0;
+#if CAGI_IR_ENABLED
+  /** The operator's IR mode, `sensors.ir`. Missing or unknown = auto, so older servers keep working. */
+  IrPolicy::Mode ir = IrPolicy::Mode::Auto;
+#endif
 };
 
 // Join the LAN with the stored creds. Blocks up to ~20s. Returns true once connected.

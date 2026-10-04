@@ -65,8 +65,9 @@ static int postJson(const String& url, const String& apiKey, const String& bodyI
   return code;
 }
 
-// Parse a `{ ..., "sensors": { "cam": bool, "mic": bool } }` body into a Control. A missing key keeps
-// that sensor's default (on); a missing `sensors` object leaves ctl->valid false (no opinion).
+// Parse a `{ ..., "sensors": { "cam": bool, "mic": bool, "ir"?: "auto"|"on"|"off" } }` body into a
+// Control. A missing key keeps that sensor's default (on; ir: auto); a missing `sensors` object leaves
+// ctl->valid false (no opinion).
 static void parseControl(const String& body, Cloud::Control* ctl) {
   if (!ctl || body.length() == 0) return;
   JsonDocument doc;
@@ -88,6 +89,10 @@ static void parseControl(const String& body, Cloud::Control* ctl) {
   ctl->valid = true;
   if (s["cam"].is<bool>()) ctl->cam = s["cam"].as<bool>();
   if (s["mic"].is<bool>()) ctl->mic = s["mic"].as<bool>();
+#if CAGI_IR_ENABLED
+  if (s["ir"].is<const char*>() && !IrPolicy::parseMode(s["ir"].as<const char*>(), &ctl->ir))
+    Serial.printf("[cfg] unknown sensors.ir \"%s\" — auto\n", s["ir"].as<const char*>());
+#endif
 }
 
 // One media POST (image/audio). Fills *res (ok/gone/authFailed/code) and parses the response into ctl

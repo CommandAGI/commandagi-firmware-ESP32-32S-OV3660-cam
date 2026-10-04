@@ -131,3 +131,27 @@ Arduino has a `main.cpp`), and the esp32-camera driver must come from the compon
 
 It never retries a SIM PIN (three wrong PINs lock the SIM), never enables GSM (`AT+CNMP=38`: a GSM
 burst draws more than the boards supply), and never logs an AT command (AT+CPIN carries the PIN).
+
+## IR night mode: the light sensor shares the camera's I2C port
+
+The LTR-308 sits on GPIO8/9, the camera's SCCB lines. The camera driver installs the legacy I2C driver
+on its SCCB port (port 1: `CONFIG_SCCB_HARDWARE_I2C_PORT1` in both S3 sdkconfigs). Arduino's `Wire`
+would start a second controller (port 0) on the same pins, and two controllers on one bus fight. That
+is why DFRobot's example says to start the camera before the sensor. So `ir.cpp` talks to the sensor
+through the camera's port with `i2c_master_write_read_device`; the driver locks each transaction. While
+the camera is down (`g_cameraOk` false, or between a deinit and a re-init) the port does not exist, so
+the firmware does not read the light and reports no `lux`.
+
+## IR night mode: off unless the camera runs
+
+Each pass of the loop clears `g_camRunning`; only the streaming path sets it (`camActive`). `Ir::service`
+runs at the top of the next pass, before any early return. So a pass that returns early (no link, a
+retry, not provisioned) or a paused camera turns IR off within one pass, in every mode. IR light with no
+camera to use it is only heat and current. In `auto` with no light reading, IR is off: the firmware does
+not know that it is dark.
+
+## IR night mode: what `on` means
+
+`on` in STATUS is the level the firmware drives on GPIO47. Nothing reads the LED current back, so it is
+not proof that the LEDs emit. The light sensor does not prove it either: the LTR-308 responds to visible
+light, and the IR LEDs face away from it.
