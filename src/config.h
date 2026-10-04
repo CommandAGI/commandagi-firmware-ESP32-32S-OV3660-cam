@@ -205,7 +205,10 @@
     #define CAGI_MODEM_UART        2
     #define CAGI_MODEM_TX_PIN     14   // → modem RXD
     #define CAGI_MODEM_RX_PIN     13   // ← modem TXD
-    #define CAGI_MODEM_PWRKEY_PIN 12   // a strap pin; the base board's pull-down keeps it low at boot
+    // IO12 (flash voltage) and IO2 (boot mode) are strap pins. The firmware drives them HIGH only in
+    // short pulses (PWRKEY 100 ms; rail off 3 s, recovery only) and LOW at all other times. Any reset
+    // makes them inputs, so the base board's 10 kΩ pull-downs hold both LOW when the straps are read.
+    #define CAGI_MODEM_PWRKEY_PIN 12
     #define CAGI_MODEM_STATUS_PIN 15
     #define CAGI_MODEM_RESET_PIN  -1
     #define CAGI_MODEM_RAIL_OFF_PIN 2  // HIGH = modem supply off; recovery only
