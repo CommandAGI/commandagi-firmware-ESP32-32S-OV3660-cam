@@ -243,7 +243,7 @@
 // ── Sealed stream (the device seals its own frames) ────────────────────────────────────────────
 // OFF by default. A build with -DCAGI_DEVICE_SEALS=1 makes an Ed25519 key on its first boot (NVS
 // namespace `cagi-seal`), stamps each frame with its capture time, indexes it in the `cam-at` channel
-// and seals the index and the frames once a second with deployments/clients/seal-c (src/seal/). Both
+// and seals each stream once a second with deployments/clients/seal-c (src/seal/). Both
 // channels are declared `seals: "device"`, so the recorder keeps them byte for byte. Frames then go as
 // addressed `frame` messages, not bare binary. README § Sealed stream; docs/integrity.md in CommandAGI.
 #ifndef CAGI_DEVICE_SEALS

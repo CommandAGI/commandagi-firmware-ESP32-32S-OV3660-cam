@@ -60,9 +60,10 @@ only the `cagi` NVS namespace, never the app. See README → _Why it can ALWAYS 
 ## Sealed stream: one writer, byte for byte
 
 The sealing build (`-DCAGI_DEVICE_SEALS`) replaces the old verified-SKU capture manifest, which signed a
-claim about each window but not the frames. Now the device signs the frames themselves: a seal's media
-root covers the exact bytes of `video.mjpeg`, and each `cam-at` line names one frame's offset, length
-and sha256. So the device must be the only writer of both, and the recorder must keep them byte for
+claim about each window but not the frames. Now the device signs the frames themselves: `cam`'s seals
+cover the exact bytes of its `video.mjpeg`, and each `cam-at` line names one frame's offset, length and
+sha256. Each stream is sealed in its own `records.jsonl`, so CommandAGI's verifier checks a stream from
+its own folder. The device must be the only writer of both, and the recorder must keep them byte for
 byte. Two rules follow in `src/seal_runtime.cpp`:
 
 - A frame is indexed only after `sendFrameJson` returned true, and sent only when its index line fits
@@ -72,7 +73,7 @@ byte. Two rules follow in `src/seal_runtime.cpp`:
 ## Sealed stream: what a reboot costs
 
 Seqs and seal counters must only increase, also across reboots, but NVS cannot take a write per line.
-So `seal_runtime.cpp` reserves 4096 seqs and 1024 counters in NVS ahead of use, and a reboot skips the
+So `seal_runtime.cpp` reserves 4096 seqs (per stream) and 1024 counters in NVS ahead of use, and a reboot skips the
 rest of the block (a seq gap, which a reader reports). The media offset and the previous seal's hash
 are not kept: after a reboot they start again at 0 and none. If the recorder continues the same stream
 file, the verifier reports a break there. Fixing that needs the recorder to start a new file or to tell

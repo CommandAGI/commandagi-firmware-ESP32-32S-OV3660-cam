@@ -1,13 +1,15 @@
 #pragma once
-// The camera's sealed stream, without Arduino (so test/host/seal_test.cpp builds it on a PC).
+// The camera's sealed streams, without Arduino (so test/host/seal_test.cpp builds them on a PC).
 //
-// The device seals its own `cam` frames and its `cam-at` index (docs/integrity.md in the CommandAGI
-// repository § sealed streams). Per frame it sent:
-//   - the frame is stamped first: a JPEG COM segment `t=<ISO>` right after SOI (mjpeg.js stampFrame);
-//   - those exact bytes grow `video.mjpeg` (the `cam` stream's media) and the sealer's media tree;
-//   - one `cam-at` line names them: {"t","seq","src":"device","kind":"event","frame":{offset,length,sha256}}.
-// About once a second a seal line covers the index lines and the media bytes since the last seal. Index
-// lines and seal lines go out in order through the outbox; the recorder keeps them byte for byte.
+// The device seals what it records itself (docs/integrity.md in the CommandAGI repository § sealed
+// streams). Two streams, each sealed in its own records.jsonl, both with one key:
+//   - `cam`: the frames. Each frame is stamped first, a JPEG COM segment `t=<ISO>` right after SOI
+//     (mjpeg.js stampFrame), and those exact bytes grow its `video.mjpeg`. Its records.jsonl holds only
+//     its seals, whose media roots cover video.mjpeg.
+//   - `cam-at`: one line per frame sent, {"t","seq","src":"device","kind":"event","frame":{offset,length,
+//     sha256}}, naming the frame's bytes in cam's video.mjpeg, and the seals over those lines.
+// About once a second each stream gets a seal. The lines of each go out in order through its outbox; the
+// recorder keeps them byte for byte. The seal counter is one counter for both: it always increases.
 #include <stddef.h>
 #include <stdint.h>
 extern "C" {
@@ -27,7 +29,8 @@ struct Config {
   bool announceChain;
   seal_sign_fn sign;
   void* signCtx;
-  uint64_t firstSeq;      // the first line's seq (see Seal::begin: seqs never go back across reboots)
+  uint64_t firstSeq;      // the first `cam-at` line's seq (Seal::begin: seqs never go back across reboots)
+  uint64_t firstMediaSeq; // the first `cam` seal's seq
   uint64_t counter;       // the next seal's counter
 };
 
@@ -37,44 +40,53 @@ size_t stampOverhead(const char* t);
 // does not start with SOI or `out` is too small.
 size_t stamp(const uint8_t* jpeg, size_t len, const char* t, uint8_t* out, size_t cap);
 
+// Lines not yet sent: whole lines, each ending in '\n', oldest first.
+struct Outbox {
+  char* buf = nullptr;
+  size_t cap = 0, len = 0;
+  // The first `n` bytes were sent.
+  void sent(size_t n);
+  bool append(const char* line, size_t n);
+};
+
 class Stream {
  public:
-  // `ctx` is the sealer's state (about 49 kB at the default SEAL_MAX_*); the caller owns its memory.
-  // `outbox` holds lines not yet sent. Returns false when the arguments are unusable.
-  bool begin(const Config& cfg, seal_ctx* ctx, char* outbox, size_t outboxCap);
+  // `index` and `media` are the two sealers' states (about 49 kB each at the default SEAL_MAX_*), the
+  // outboxes the two streams' unsent lines; the caller owns their memory.
+  bool begin(const Config& cfg, seal_ctx* index, seal_ctx* media, char* indexOutbox, char* mediaOutbox, size_t outboxCap);
 
-  // Whether a frame of `stampedLen` bytes fits in the current seal and its index line in the outbox.
-  // When it does not, seal first (and send the outbox); a frame is never sent that cannot be indexed.
+  // Whether a frame of `stampedLen` bytes fits in the current seals and its line in the outbox. When it
+  // does not, seal first (and send the outboxes); a frame is never sent that cannot be indexed.
   bool room(size_t stampedLen) const;
   // A stamped frame that was sent: grow the media tree and write its index line. `t` is its stamp.
-  // `clockSet` false makes the next seal say clock "none". Returns false (and indexes nothing) when
-  // room() would have said no.
+  // `clockSet` false makes the next seals say clock "none". False (nothing recorded) when room() is false.
   bool frameSent(const uint8_t* stamped, size_t len, const char* t, bool clockSet);
 
   // Lines or media bytes wait for a seal.
   bool pending() const;
-  // The seal line for everything since the last seal, appended to the outbox. `block` is canonical
-  // JSON or null; `status` a canonical JSON object or null. Returns false when nothing is pending, the
-  // outbox is full, or the key would not sign (then nothing changes: the next call covers the same).
+  // Seal each stream that has something pending: `cam` first, then `cam-at`. `block` is canonical JSON
+  // or null; `status` a canonical JSON object or null. False when a seal that was due could not be made
+  // (its outbox is full, or the key would not sign); what it would have covered stays pending.
   bool seal(const char* t, bool clockSet, const char* block, const char* status);
 
-  // The outbox: whole lines, each ending in '\n', oldest first.
-  const char* outbox() const { return outbox_; }
-  size_t outboxLen() const { return outboxLen_; }
-  // The first `n` bytes of the outbox were sent.
-  void sent(size_t n);
-
-  uint64_t nextSeq() const { return seq_; }
-  uint64_t counter() const { return ctx_ ? ctx_->counter : 0; }
+  Outbox& indexOutbox() { return index_.out; }
+  Outbox& mediaOutbox() { return media_.out; }
+  uint64_t nextSeq() const { return index_.seq; }
+  uint64_t nextMediaSeq() const { return media_.seq; }
+  uint64_t counter() const { return counter_; }
   uint64_t mediaOffset() const { return offset_; }
 
  private:
-  bool append(const char* line, size_t len);
-  seal_ctx* ctx_ = nullptr;
-  char* outbox_ = nullptr;
-  size_t outboxCap_ = 0, outboxLen_ = 0;
-  uint64_t seq_ = 1, offset_ = 0;
-  bool clockUnset_ = false;  // some line since the last seal was stamped before the clock was set
+  struct Part {
+    seal_ctx* ctx = nullptr;
+    Outbox out;
+    uint64_t seq = 1;
+    bool clockUnset = false;  // something since its last seal was stamped before the clock was set
+    bool pending() const;
+    bool seal(const char* t, bool clockSet, const char* block, const char* status, uint64_t& counter);
+  };
+  Part index_, media_;
+  uint64_t offset_ = 0, counter_ = 0;
 };
 
 }  // namespace DeviceSeal

@@ -1,13 +1,13 @@
-// Host test of the camera's sealed stream (src/device_seal.cpp over src/seal/seal.c): a camera sends
-// frames for three seconds and seals once a second. It prints the `cam-at` records.jsonl on stdout and
-// writes `video.mjpeg` to argv[1]. The CommandAGI repository's tests/workbench/seal-c.test.mjs builds
-// and runs it, and its JavaScript verifier (packages/domain/world/seals.js verifySeals) must accept both
-// files as they are. TweetNaCl stands in for libsodium's Ed25519 (the same signature scheme):
+// Host test of the camera's sealed streams (src/device_seal.cpp over src/seal/seal.c): a camera sends
+// frames for three seconds and seals once a second. It prints `cam-at`'s records.jsonl on stdout, and
+// writes `cam`'s video.mjpeg to argv[1] and its records.jsonl (its seals) to argv[2]. The CommandAGI
+// repository's tests/workbench/seal-c.test.mjs builds and runs it, and its JavaScript verifier
+// (packages/domain/world/seals.js verifySeals) must accept the files as they are. TweetNaCl stands in for libsodium's Ed25519 (the same signature scheme):
 //
 //   cc -O2 -c -I<seal-c>/test <seal-c>/test/tweetnacl.c -o /tmp/tweetnacl.o
 //   cc -O2 -c src/seal/seal.c -o /tmp/seal.o
-//   g++ -std=c++17 -O2 -Wall -Werror -Isrc -I<seal-c>/test test/host/seal_test.cpp src/device_seal.cpp
-//       /tmp/seal.o /tmp/tweetnacl.o -o /tmp/seal_test && /tmp/seal_test /tmp/video.mjpeg
+//   g++ -std=c++11 -O2 -Wall -Werror -Isrc -I<seal-c>/test test/host/seal_test.cpp src/device_seal.cpp
+//       /tmp/seal.o /tmp/tweetnacl.o -o /tmp/seal_test && /tmp/seal_test /tmp/video.mjpeg /tmp/cam.jsonl
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,7 +60,7 @@ void fail(const char* why) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) return 2;
+  if (argc < 3) return 2;
   unsigned char pk[32];
   crypto_sign_keypair(pk, g_sk);
   uint8_t spki[44] = {0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
@@ -68,12 +68,12 @@ int main(int argc, char** argv) {
   char announce[64];
   b64u(spki, sizeof spki, announce);
 
-  static seal_ctx ctx;
-  static char outbox[65536];
+  static seal_ctx index, mediaCtx;
+  static char indexOut[65536], mediaOut[65536];
   DeviceSeal::Stream s;
-  // A camera that rebooted: its seqs and its counter go on from where its last reservation ended.
-  const DeviceSeal::Config cfg = {"ed25519", spki, sizeof spki, announce, false, sign, nullptr, 4097, 2048};
-  if (!s.begin(cfg, &ctx, outbox, sizeof outbox)) fail("begin");
+  // A camera that rebooted: its seqs and its counter go on from where its last reservations ended.
+  const DeviceSeal::Config cfg = {"ed25519", spki, sizeof spki, announce, false, sign, nullptr, 4097, 1025, 2048};
+  if (!s.begin(cfg, &index, &mediaCtx, indexOut, mediaOut, sizeof indexOut)) fail("begin");
 
   // Stamping refuses what is not a JPEG and a buffer that is too small.
   uint8_t small[8];
@@ -81,10 +81,13 @@ int main(int argc, char** argv) {
   if (DeviceSeal::stamp(notJpeg, sizeof notJpeg, "2026-10-03T12:00:00.000Z", small, sizeof small)) fail("stamped a non-JPEG");
   const std::vector<uint8_t> tiny = jpeg(8, 0);
   if (DeviceSeal::stamp(tiny.data(), tiny.size(), "2026-10-03T12:00:00.000Z", small, sizeof small)) fail("stamped into a short buffer");
-  if (s.seal("2026-10-03T12:00:00.000Z", true, nullptr, nullptr)) fail("sealed nothing");
+  if (!s.seal("2026-10-03T12:00:00.000Z", true, nullptr, nullptr) || s.counter() != 2048 || s.indexOutbox().len ||
+      s.mediaOutbox().len)
+    fail("sealed nothing");
 
   FILE* media = fopen(argv[1], "wb");
-  if (!media) return 2;
+  FILE* cam = fopen(argv[2], "wb");
+  if (!media || !cam) return 2;
   const char* block = "{\"chain\":\"solana:devnet\",\"hash\":\"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin\",\"slot\":4242}";
   const char* status = "{\"boot\":\"unverified\",\"flash\":\"plain\",\"fw\":\"1.3.0\"}";
   std::vector<uint8_t> stamped;
@@ -107,17 +110,25 @@ int main(int argc, char** argv) {
     char t[32];
     snprintf(t, sizeof t, "2026-10-03T12:00:%02d.950Z", sec);
     if (!s.seal(t, true, sec ? block : nullptr, status)) fail("seal");
-    // The outbox goes out in two parts in the last second, as a socket might take it.
+    // The index goes out in two parts in the last second, as a socket might take it.
+    DeviceSeal::Outbox& ix = s.indexOutbox();
     if (sec == 2) {
-      const char* nl = strchr(s.outbox(), '\n');
-      const size_t first = (size_t)(nl - s.outbox()) + 1;
-      fwrite(s.outbox(), 1, first, stdout);
-      s.sent(first);
+      const size_t first = (size_t)(strchr(ix.buf, '\n') - ix.buf) + 1;
+      fwrite(ix.buf, 1, first, stdout);
+      ix.sent(first);
     }
-    fwrite(s.outbox(), 1, s.outboxLen(), stdout);
-    s.sent(s.outboxLen());
+    fwrite(ix.buf, 1, ix.len, stdout);
+    ix.sent(ix.len);
+    // The frames' seals wait one second while the socket is down.
+    DeviceSeal::Outbox& mx = s.mediaOutbox();
+    if (sec != 1) {
+      fwrite(mx.buf, 1, mx.len, cam);
+      mx.sent(mx.len);
+    }
   }
   fclose(media);
-  if (s.outboxLen() != 0 || s.nextSeq() != 4097 + 11 + 3 || s.counter() != 2051) fail("seq or counter");
+  fclose(cam);
+  if (s.indexOutbox().len || s.mediaOutbox().len) fail("an outbox kept lines");
+  if (s.nextSeq() != 4097 + 11 + 3 || s.nextMediaSeq() != 1025 + 3 || s.counter() != 2048 + 6) fail("seq or counter");
   return 0;
 }

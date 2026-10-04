@@ -292,27 +292,30 @@ claim, signed.
 
 | channel | medium | what |
 | --- | --- | --- |
-| `cam` | video (`video.mjpeg`) | each frame, stamped first: a JPEG COM segment `t=<ISO time>` right after SOI (CommandAGI's `mjpeg.js` `stampFrame`) |
-| `cam-at` | records (`byte-ranges`) | one line per frame sent, `{"t","seq","src":"device","kind":"event","frame":{"offset","length","sha256"}}`, and the seals |
+| `cam` | video | `video.mjpeg`: each frame, stamped first: a JPEG COM segment `t=<ISO time>` right after SOI (CommandAGI's `mjpeg.js` `stampFrame`). `records.jsonl`: only its seals |
+| `cam-at` | records (`byte-ranges`) | one line per frame sent, `{"t","seq","src":"device","kind":"event","frame":{"offset","length","sha256"}}` (the frame's bytes in `cam`'s `video.mjpeg`), and its seals |
 
-About once a second, a seal line covers the `cam-at` lines and the `video.mjpeg` bytes since the seal
-before it (RFC 9162 Merkle roots, 64 KiB media chunks). It names a recent block, fetched from
+About once a second each stream gets a seal line in its own `records.jsonl`: `cam`'s covers the
+`video.mjpeg` bytes since its last seal, `cam-at`'s the index lines since its last seal (RFC 9162 Merkle
+roots, 64 KiB media chunks). One key signs both, and one counter numbers both. A seal names a recent block, fetched from
 `GET <api>/public/chain/block` every 10 s, so the frames after it were made after that block. Its
-`clock` is `ntp` when SNTP set the clock before every line it covers, else `none`. The first seal after
-a boot announces the key: the factory's certificate chain when the unit has one, else the bare key
-(`spki`). Seqs and seal counters never go back, also across a reboot: the device reserves them in NVS
-4096 seqs and 1024 counters at a time, so a reboot leaves a gap.
+`clock` is `ntp` when SNTP set the clock before every frame it covers, else `none`. The first seal of
+each stream after a boot announces the key: the factory's certificate chain when the unit has one, else
+the bare key (`spki`). Seqs and seal counters never go back, also across a reboot: the device reserves
+them in NVS 4096 seqs and 1024 counters at a time, so a reboot leaves a gap.
 
 **The wire** (the realtime socket). A frame is sent only when it can be indexed, and it is indexed only
 when it was sent:
 
 ```json
 {"type":"frame","channelId":"cam","kind":"camera","url":"data:image/jpeg;base64,<the stamped frame>"}
-{"type":"data","channelId":"cam-at","kind":"events","format":"jsonl","url":"data:text/plain;base64,<lines, each ending in \n>"}
+{"type":"data","channelId":"cam","kind":"camera","format":"jsonl","url":"data:text/plain;base64,<cam's seal lines, each ending in \n>"}
+{"type":"data","channelId":"cam-at","kind":"events","format":"jsonl","url":"data:text/plain;base64,<cam-at's lines, each ending in \n>"}
 ```
 
-A sealing build does not send bare binary frames (the platform does not record those). The lines wait
-in a 64 kB outbox until the socket takes them; while it is full, no frame is sent.
+A sealing build does not send bare binary frames (the platform does not record those). Each stream's
+lines wait in a 32 kB outbox until the socket takes them, once a second with the seals; while the index
+outbox is full, no frame is sent.
 
 **The certificate.** The factory certifies the key with CommandAGI's `scripts/integrity/device-ca.mjs`
 (`--key software --envelope none` for Cam-002). On the bench, before the unit has creds:
@@ -335,12 +338,13 @@ also carries the key (`sealKey`, base64url SPKI).
   encryption (an `nvs_keys` partition) so that the key in NVS is encrypted too. Flash encryption alone
   does not encrypt NVS. These burn eFuses and need the owner's signing key, so no env enables them; the
   seals say `flash: plain` until one does.
-- A reboot, or a frame lost after `sendTXT` returned, breaks the seal chain in the recorder's file: the
-  device starts its media offsets at 0 and its `prev` at none after a reboot, while the recorder
+- A reboot, or a frame lost after `sendTXT` returned, breaks the seal chain in the recorder's files: the
+  device starts its media offset at 0 and its `prev` at none after a reboot, while the recorder
   continues the same `video.mjpeg` and `records.jsonl`. The verifier then reports the break; it does
   not repair it.
 - The platform side (CommandAGI `docs/next.md` § integrity): its runtime ingress throttles the frames
-  it records and rewrites a `data` line, so it does not yet keep these frames and lines byte for byte.
+  it records and turns a `data` message into a line of its own, so it does not yet keep these frames
+  and lines byte for byte.
 
 ## Remote sensor control
 
@@ -392,7 +396,7 @@ src/
   cellular.*        LTE modem: power, AT setup, PPP into lwIP (optional, cellular envs)
   battery.*         cell voltage / percent / charging (optional)
   seal/             seal.h, seal.c: CommandAGI's deployments/clients/seal-c, verbatim (plain C)
-  device_seal.*     the sealed camera stream: stamp, index, seal, outbox (plain C++, host-tested)
+  device_seal.*     the sealed camera streams: stamp, index, seal, outboxes (plain C++, host-tested)
   seal_runtime.*    the key in NVS, libsodium Ed25519, SNTP, the block, the serial commands (optional)
   CMakeLists.txt    the ESP-IDF main component (cellular envs only)
   idf_component.yml esp32-camera from the ESP-IDF registry (cellular envs only)
@@ -401,7 +405,7 @@ sdkconfig.defaults.*  Arduino's sdkconfig + PPP, per SoC (cellular envs only)
   clip.*            speaker clip decoder: WAV PCM16 / MP3 → mono PCM16 (plain C++, host-tested)
   third_party/      minimp3.h (CC0, github.com/lieff/minimp3 at ea99364f)
 test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++;
-                    seal_test.cpp: the sealed stream, verified by CommandAGI's JavaScript verifier
+                    seal_test.cpp: the sealed streams, verified by CommandAGI's JavaScript verifier
 tools/              batch-flash.mjs, read-suffix.py (labels); seal-provision.py (the key's certificate)
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
@@ -437,8 +441,8 @@ the speaker, the WebSocket messages, the video rate with the mic on, the modem s
 PlatformIO 6.2.0 compiled `esp32cam`, `esp32cam-s3`, `esp32cam-s3-seals`, `esp32cam-cellular`,
 `esp32cam-s3-cellular`, `esp32cam` with `-DCAGI_DEVICE_SEALS=1`, and
 `hardware/CommandAGI-Cam-002/firmware` (`commandagi-cam-002`, `commandagi-cam-002-battery`, both with
-the sealed stream). The sealed stream adds about 137 kB of flash (most of it libsodium) and 4.7 kB of
-static RAM; the sealer's state (49 kB) and the outbox (64 kB) are in PSRAM. `test/host/seal_test.cpp`
-passed in CommandAGI's `tests/workbench/seal-c.test.mjs`: its `cam-at` lines and `video.mjpeg` verify
-in JavaScript, every index line names the bytes and stamp of its frame, and a lost frame or a changed
-line breaks the seal. No board ran this firmware.
+the sealed stream). The sealed stream adds about 137 kB of flash (most of it libsodium) and 4.8 kB of
+static RAM; the two sealers' state (2 x 49 kB) and the two outboxes (2 x 32 kB) are in PSRAM.
+`test/host/seal_test.cpp` passed in CommandAGI's `tests/workbench/seal-c.test.mjs`: `cam`'s seals with
+its `video.mjpeg`, and `cam-at`'s lines, verify in JavaScript; every index line names the bytes and the
+stamp of its frame; a lost frame or a changed line breaks a seal. No board ran this firmware.

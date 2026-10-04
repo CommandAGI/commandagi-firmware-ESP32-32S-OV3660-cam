@@ -36,26 +36,53 @@ size_t stamp(const uint8_t* jpeg, size_t len, const char* t, uint8_t* out, size_
   return len + extra;
 }
 
-bool Stream::begin(const Config& cfg, seal_ctx* ctx, char* outbox, size_t outboxCap) {
-  if (!ctx || !outbox || outboxCap < 1024 || !cfg.sign || !cfg.spki || !cfg.alg || cfg.firstSeq < 1) return false;
-  seal_init(ctx, cfg.alg, cfg.spki, cfg.spkiLen, cfg.announce, cfg.announceChain ? 1 : 0, "none", cfg.sign, cfg.signCtx);
-  ctx->counter = cfg.counter;
-  ctx_ = ctx;
-  outbox_ = outbox;
-  outboxCap_ = outboxCap;
-  outboxLen_ = 0;
-  outbox_[0] = 0;
-  seq_ = cfg.firstSeq;
+void Outbox::sent(size_t n) {
+  if (n >= len) {
+    len = 0;
+  } else {
+    memmove(buf, buf + n, len - n);
+    len -= n;
+  }
+  buf[len] = 0;
+}
+
+bool Outbox::append(const char* line, size_t n) {
+  if (len + n + 1 >= cap) return false;
+  memcpy(buf + len, line, n);
+  buf[len + n] = '\n';
+  len += n + 1;
+  buf[len] = 0;
+  return true;
+}
+
+bool Stream::begin(const Config& cfg, seal_ctx* index, seal_ctx* media, char* indexOutbox, char* mediaOutbox, size_t outboxCap) {
+  if (!index || !media || !indexOutbox || !mediaOutbox || outboxCap < 4096 || !cfg.sign || !cfg.spki || !cfg.alg ||
+      cfg.firstSeq < 1 || cfg.firstMediaSeq < 1)
+    return false;
+  // Each stream's file announces the key in its own first seal.
+  seal_init(index, cfg.alg, cfg.spki, cfg.spkiLen, cfg.announce, cfg.announceChain ? 1 : 0, "none", cfg.sign, cfg.signCtx);
+  seal_init(media, cfg.alg, cfg.spki, cfg.spkiLen, cfg.announce, cfg.announceChain ? 1 : 0, "none", cfg.sign, cfg.signCtx);
+  index_ = Part{};
+  media_ = Part{};
+  index_.ctx = index;
+  media_.ctx = media;
+  index_.out.buf = indexOutbox;
+  media_.out.buf = mediaOutbox;
+  index_.out.cap = media_.out.cap = outboxCap;
+  indexOutbox[0] = mediaOutbox[0] = 0;
+  index_.seq = cfg.firstSeq;
+  media_.seq = cfg.firstMediaSeq;
   offset_ = 0;
-  clockUnset_ = false;
+  counter_ = cfg.counter;
   return true;
 }
 
 bool Stream::room(size_t stampedLen) const {
-  if (!ctx_ || ctx_->n >= SEAL_MAX_LINES || outboxLen_ + kIndexLineMax >= outboxCap_) return false;
+  const seal_ctx* m = media_.ctx;
+  if (!index_.ctx || index_.ctx->n >= SEAL_MAX_LINES || index_.out.len + kIndexLineMax >= index_.out.cap) return false;
   // Leaves after this frame: the full chunks so far, the chunks it fills, and a part-filled tail.
-  const uint64_t fill = (uint64_t)ctx_->chunk_fill + stampedLen;
-  const uint64_t leaves = ctx_->mn + fill / SEAL_MEDIA_CHUNK + (fill % SEAL_MEDIA_CHUNK ? 1 : 0);
+  const uint64_t fill = (uint64_t)m->chunk_fill + stampedLen;
+  const uint64_t leaves = m->mn + fill / SEAL_MEDIA_CHUNK + (fill % SEAL_MEDIA_CHUNK ? 1 : 0);
   return leaves <= SEAL_MAX_CHUNKS;
 }
 
@@ -70,54 +97,48 @@ bool Stream::frameSent(const uint8_t* stamped, size_t len, const char* t, bool c
   hex(digest, 32, digestHex);
   const int n = snprintf(line, sizeof line,
                          "{\"t\":\"%s\",\"seq\":%llu,\"src\":\"device\",\"kind\":\"event\",\"frame\":{\"offset\":%llu,\"length\":%llu,\"sha256\":\"%s\"}}",
-                         t, (unsigned long long)seq_, (unsigned long long)offset_, (unsigned long long)len, digestHex);
+                         t, (unsigned long long)index_.seq, (unsigned long long)offset_, (unsigned long long)len, digestHex);
   if (n <= 0 || (size_t)n >= sizeof line) return false;
-  // room() said both fit, so neither of these can fail; the media goes first because it is the larger.
-  if (seal_media(ctx_, kMediaFile, offset_, stamped, len) != 0) return false;
-  seal_line(ctx_, line, (size_t)n, seq_);
-  append(line, (size_t)n);
+  // room() said all three fit, so none of these can fail.
+  if (seal_media(media_.ctx, kMediaFile, offset_, stamped, len) != 0) return false;
+  seal_line(index_.ctx, line, (size_t)n, index_.seq);
+  index_.out.append(line, (size_t)n);
   offset_ += len;
-  seq_++;
-  if (!clockSet) clockUnset_ = true;
+  index_.seq++;
+  if (!clockSet) index_.clockUnset = media_.clockUnset = true;
   return true;
 }
 
-bool Stream::pending() const { return ctx_ && (ctx_->n > 0 || (ctx_->media_file[0] && ctx_->media_to > ctx_->media_from)); }
+bool Stream::Part::pending() const {
+  return ctx && (ctx->n > 0 || (ctx->media_file[0] && ctx->media_to > ctx->media_from));
+}
 
-bool Stream::seal(const char* t, bool clockSet, const char* block, const char* status) {
-  if (!pending() || outboxLen_ + 2 >= outboxCap_) return false;
-  ctx_->clock = clockSet && !clockUnset_ ? "ntp" : "none";
-  char* at = outbox_ + outboxLen_;
-  const int n = seal_emit(ctx_, t, seq_, block, status, at, outboxCap_ - outboxLen_ - 1);
+bool Stream::Part::seal(const char* t, bool clockSet, const char* block, const char* status, uint64_t& counter) {
+  if (out.len + 2 >= out.cap) return false;
+  ctx->clock = clockSet && !clockUnset ? "ntp" : "none";
+  ctx->counter = counter;
+  char* at = out.buf + out.len;
+  const int n = seal_emit(ctx, t, seq, block, status, at, out.cap - out.len - 1);
   if (n < 0) {
-    outbox_[outboxLen_] = 0;
+    out.buf[out.len] = 0;
     return false;
   }
   at[n] = '\n';
-  outboxLen_ += (size_t)n + 1;
-  outbox_[outboxLen_] = 0;
-  seq_++;
-  clockUnset_ = false;
+  out.len += (size_t)n + 1;
+  out.buf[out.len] = 0;
+  counter = ctx->counter;
+  seq++;
+  clockUnset = false;
   return true;
 }
 
-bool Stream::append(const char* line, size_t len) {
-  if (outboxLen_ + len + 1 >= outboxCap_) return false;
-  memcpy(outbox_ + outboxLen_, line, len);
-  outbox_[outboxLen_ + len] = '\n';
-  outboxLen_ += len + 1;
-  outbox_[outboxLen_] = 0;
-  return true;
-}
+bool Stream::pending() const { return index_.pending() || media_.pending(); }
 
-void Stream::sent(size_t n) {
-  if (n >= outboxLen_) {
-    outboxLen_ = 0;
-  } else {
-    memmove(outbox_, outbox_ + n, outboxLen_ - n);
-    outboxLen_ -= n;
-  }
-  outbox_[outboxLen_] = 0;
+bool Stream::seal(const char* t, bool clockSet, const char* block, const char* status) {
+  bool ok = true;
+  if (media_.pending()) ok = media_.seal(t, clockSet, block, status, counter_) && ok;
+  if (index_.pending()) ok = index_.seal(t, clockSet, block, status, counter_) && ok;
+  return ok;
 }
 
 }  // namespace DeviceSeal

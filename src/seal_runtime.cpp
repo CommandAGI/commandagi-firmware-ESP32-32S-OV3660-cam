@@ -20,7 +20,7 @@ namespace {
 // line. So a block of each is reserved in NVS ahead of use; a reboot skips the rest of the block.
 constexpr uint64_t kSeqBlock = 4096;
 constexpr uint64_t kCounterBlock = 1024;
-constexpr size_t kOutboxBytes = 64 * 1024;
+constexpr size_t kOutboxBytes = 32 * 1024;  // each stream's
 constexpr uint32_t kSealEveryMs = 1000;
 constexpr uint32_t kBlockEveryMs = 10000;
 // Times before this were not set by SNTP: the RTC starts at 1970 on every boot and SNTP is the only clock.
@@ -35,11 +35,13 @@ String g_chain;  // JSON array of base64 DER certificates, leaf first; empty unt
 String g_announce;
 char g_status[96];
 String g_block;  // canonical {"chain","hash","slot"} of the last block fetched; empty for none
-uint64_t g_seqLimit = 0, g_counterLimit = 0;
+uint64_t g_seqLimit = 0, g_mediaSeqLimit = 0, g_counterLimit = 0;
 uint32_t g_nextSeal = 0, g_nextBlock = 0;
 bool g_sntpStarted = false;
-seal_ctx* g_ctx = nullptr;
-char* g_outbox = nullptr;
+seal_ctx* g_index = nullptr;  // cam-at's sealer
+seal_ctx* g_media = nullptr;  // cam's sealer
+char* g_indexOut = nullptr;
+char* g_mediaOut = nullptr;
 uint8_t* g_stamped = nullptr;
 size_t g_stampedCap = 0;
 DeviceSeal::Stream g_stream;
@@ -90,21 +92,27 @@ void reserve(const char* key, uint64_t next, uint64_t& limit, uint64_t block) {
   }
 }
 
+// Each stream's lines go to its own channel: cam's seals to `cam`, the index and its seals to `cam-at`.
 void flush() {
-  if (!g_stream.outboxLen() || !CloudWs::connected()) return;
-  if (CloudWs::sendLines(CAGI_SEAL_INDEX_CHANNEL, "events", g_stream.outbox(), g_stream.outboxLen()))
-    g_stream.sent(g_stream.outboxLen());
+  if (!CloudWs::connected()) return;
+  DeviceSeal::Outbox& m = g_stream.mediaOutbox();
+  if (m.len && CloudWs::sendLines(CAGI_STREAM_CHANNEL, "camera", m.buf, m.len)) m.sent(m.len);
+  DeviceSeal::Outbox& i = g_stream.indexOutbox();
+  if (i.len && CloudWs::sendLines(CAGI_SEAL_INDEX_CHANNEL, "events", i.buf, i.len)) i.sent(i.len);
+}
+
+void reserveAll() {
+  reserve("seq", g_stream.nextSeq(), g_seqLimit, kSeqBlock);
+  reserve("mseq", g_stream.nextMediaSeq(), g_mediaSeqLimit, kSeqBlock);
+  reserve("ctr", g_stream.counter(), g_counterLimit, kCounterBlock);
 }
 
 void sealNow() {
   char t[64];
   isoNow(t);
-  if (g_stream.seal(t, clockSet(), g_block.length() ? g_block.c_str() : nullptr, g_status)) {
-    reserve("ctr", g_stream.counter(), g_counterLimit, kCounterBlock);
-    reserve("seq", g_stream.nextSeq(), g_seqLimit, kSeqBlock);
-  } else if (g_stream.pending()) {
-    Serial.println("[seal] could not seal (outbox full or the key would not sign)");
-  }
+  if (!g_stream.seal(t, clockSet(), g_block.length() ? g_block.c_str() : nullptr, g_status))
+    Serial.println("[seal] could not seal (an outbox is full, or the key would not sign)");
+  reserveAll();
   flush();
 }
 
@@ -156,8 +164,8 @@ void command(const char* line) {
     g_chain = "";
     Serial.println("seal-chain cleared: the first seal after the next boot announces the bare key");
   } else if (!strcmp(line, "seal-status")) {
-    Serial.printf("seal-status key=%s certified=%s seq=%llu counter=%llu clock=%s block=%s status=%s\n", g_ctx ? g_ctx->key : "none",
-                  g_chain.length() ? "yes" : "no", (unsigned long long)g_stream.nextSeq(),
+    Serial.printf("seal-status key=%s certified=%s seq=%llu/%llu counter=%llu clock=%s block=%s status=%s\n", g_index ? g_index->key : "none",
+                  g_chain.length() ? "yes" : "no", (unsigned long long)g_stream.nextSeq(), (unsigned long long)g_stream.nextMediaSeq(),
                   (unsigned long long)g_stream.counter(), clockSet() ? "ntp" : "none", g_block.length() ? g_block.c_str() : "none",
                   g_status);
   }
@@ -194,6 +202,7 @@ void begin() {
   memset(seed, 0, sizeof seed);
   g_chain = p.getString("chain", "");
   const uint64_t firstSeq = p.getULong64("seq", 1);
+  const uint64_t firstMediaSeq = p.getULong64("mseq", 1);
   const uint64_t counter = p.getULong64("ctr", 0);
   p.end();
 
@@ -205,20 +214,21 @@ void begin() {
            esp_secure_boot_enabled() ? "verified" : "unverified", esp_flash_encryption_enabled() ? "encrypted" : "plain",
            CAGI_FW_VERSION);
 
-  g_ctx = (seal_ctx*)psram(sizeof(seal_ctx));
-  g_outbox = (char*)psram(kOutboxBytes);
-  const DeviceSeal::Config cfg = {"ed25519", g_spki, sizeof g_spki, g_announce.c_str(), g_chain.length() > 0, signEd25519, nullptr, firstSeq, counter};
-  if (!g_ctx || !g_outbox || !g_stream.begin(cfg, g_ctx, g_outbox, kOutboxBytes)) {
+  g_index = (seal_ctx*)psram(sizeof(seal_ctx));
+  g_media = (seal_ctx*)psram(sizeof(seal_ctx));
+  g_indexOut = (char*)psram(kOutboxBytes);
+  g_mediaOut = (char*)psram(kOutboxBytes);
+  const DeviceSeal::Config cfg = {"ed25519", g_spki, sizeof g_spki, g_announce.c_str(), g_chain.length() > 0, signEd25519, nullptr,
+                                  firstSeq, firstMediaSeq, counter};
+  if (!g_index || !g_media || !g_indexOut || !g_mediaOut || !g_stream.begin(cfg, g_index, g_media, g_indexOut, g_mediaOut, kOutboxBytes)) {
     Serial.println("[seal] out of memory: this unit does not seal");
     return;
   }
   // This boot's blocks start where the last boot's reservations ended.
-  g_seqLimit = g_counterLimit = 0;
-  reserve("seq", firstSeq, g_seqLimit, kSeqBlock);
-  reserve("ctr", counter, g_counterLimit, kCounterBlock);
+  reserveAll();
   g_ready = true;
-  Serial.printf("[seal] key %s (%s), seq from %llu, %s\n", g_ctx->key, g_chain.length() ? "certified" : "not certified",
-                (unsigned long long)firstSeq, g_status);
+  Serial.printf("[seal] key %s (%s), seqs from %llu/%llu, %s\n", g_index->key, g_chain.length() ? "certified" : "not certified",
+                (unsigned long long)firstSeq, (unsigned long long)firstMediaSeq, g_status);
 }
 
 void serial() {
@@ -255,7 +265,7 @@ bool sendFrame(const uint8_t* jpeg, size_t len) {
   const size_t n = DeviceSeal::stamp(jpeg, len, t, g_stamped, g_stampedCap);
   if (!n || !CloudWs::sendFrameJson(CAGI_STREAM_CHANNEL, g_stamped, n)) return false;
   g_stream.frameSent(g_stamped, n, t, clockSet());
-  reserve("seq", g_stream.nextSeq(), g_seqLimit, kSeqBlock);
+  reserveAll();
   return true;
 }
 
