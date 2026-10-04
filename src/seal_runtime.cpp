@@ -12,6 +12,7 @@
 #include <sodium.h>
 #include "mbedtls/base64.h"
 #include "device_seal.h"
+#include "camera.h"
 #include "cloud.h"
 #include "cloud_ws.h"
 
@@ -22,7 +23,7 @@ constexpr uint64_t kSeqBlock = 4096;
 constexpr uint64_t kCounterBlock = 1024;
 constexpr size_t kOutboxBytes = 32 * 1024;  // each stream's
 constexpr uint32_t kSealEveryMs = 1000;
-constexpr uint32_t kBlockEveryMs = 10000;
+constexpr uint32_t kHeadEveryMs = 10000;
 // Times before this were not set by SNTP: the RTC starts at 1970 on every boot and SNTP is the only clock.
 constexpr time_t kClockSetAfter = 1735689600;  // 2025-01-01T00:00:00Z
 
@@ -34,9 +35,16 @@ char g_spkiB64u[64];
 String g_chain;  // JSON array of base64 DER certificates, leaf first; empty until the factory certifies the key
 String g_announce;
 char g_status[96];
-String g_block;  // canonical {"chain","hash","slot"} of the last block fetched; empty for none
+String g_log;  // canonical {"head","seq"} of the contract log's last head fetched; empty for none
+// A frame request waiting for serveFrameRequest: one at a time (a second one is refused at once).
+struct FrameRequest {
+  bool waiting = false;
+  char requestId[97];
+  char channelId[97];
+};
+FrameRequest g_frameRequest;
 uint64_t g_seqLimit = 0, g_mediaSeqLimit = 0, g_counterLimit = 0;
-uint32_t g_nextSeal = 0, g_nextBlock = 0;
+uint32_t g_nextSeal = 0, g_nextHead = 0;
 bool g_sntpStarted = false;
 seal_ctx* g_index = nullptr;  // cam-at's sealer
 seal_ctx* g_media = nullptr;  // cam's sealer
@@ -113,7 +121,7 @@ void reserveAll() {
 void sealNow() {
   char t[64];
   isoNow(t);
-  if (!g_stream.seal(t, clockSet(), g_block.length() ? g_block.c_str() : nullptr, g_status))
+  if (!g_stream.seal(t, clockSet(), g_log.length() ? g_log.c_str() : nullptr, g_status))
     Serial.println("[seal] could not seal (an outbox is full, or the key would not sign)");
   reserveAll();
   flush();
@@ -167,9 +175,9 @@ void command(const char* line) {
     g_chain = "";
     Serial.println("seal-chain cleared: the first seal after the next boot announces the bare key");
   } else if (!strcmp(line, "seal-status")) {
-    Serial.printf("seal-status key=%s certified=%s seq=%llu/%llu counter=%llu clock=%s block=%s status=%s\n", g_index ? g_index->key : "none",
+    Serial.printf("seal-status key=%s certified=%s seq=%llu/%llu counter=%llu clock=%s log=%s status=%s\n", g_index ? g_index->key : "none",
                   g_chain.length() ? "yes" : "no", (unsigned long long)g_stream.nextSeq(), (unsigned long long)g_stream.nextMediaSeq(),
-                  (unsigned long long)g_stream.counter(), clockSet() ? "ntp" : "none", g_block.length() ? g_block.c_str() : "none",
+                  (unsigned long long)g_stream.counter(), clockSet() ? "ntp" : "none", g_log.length() ? g_log.c_str() : "none",
                   g_status);
   }
 }
@@ -279,10 +287,10 @@ void loop(const Creds& c) {
     configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
     g_sntpStarted = true;
   }
-  if (CloudWs::connected() && (int32_t)(now - g_nextBlock) >= 0) {
-    String block;
-    if (Cloud::chainBlock(c, block)) g_block = block;
-    g_nextBlock = millis() + kBlockEveryMs;
+  if (CloudWs::connected() && (int32_t)(now - g_nextHead) >= 0) {
+    String head;
+    if (Cloud::logHead(c, head)) g_log = head;
+    g_nextHead = millis() + kHeadEveryMs;
   }
   // Lines go out once a second, with their seal, not one message per frame.
   if ((int32_t)(now - g_nextSeal) >= 0) {
@@ -294,11 +302,57 @@ void loop(const Creds& c) {
 
 String spki() { return g_ready ? String(g_spkiB64u) : String(); }
 
+namespace {
+void answerFrame(const char* requestId, const char* channelId, uint64_t seq, const char* hash, const char* refused) {
+  char out[320];
+  if (DeviceSeal::frameAnswer(out, sizeof out, requestId, channelId, seq, hash, refused)) CloudWs::sendText(String(out));
+}
+}  // namespace
+
+void serveFrameRequest(bool cameraOn) {
+  if (!g_frameRequest.waiting) return;
+  FrameRequest r = g_frameRequest;
+  g_frameRequest.waiting = false;
+  if (!g_ready) return answerFrame(r.requestId, r.channelId, 0, nullptr, "this unit does not seal");
+  if (!cameraOn) return answerFrame(r.requestId, r.channelId, 0, nullptr, "the camera is off");
+  uint8_t* buf = nullptr;
+  size_t len = 0;
+  if (!Camera::capture(&buf, &len)) return answerFrame(r.requestId, r.channelId, 0, nullptr, "the sensor returned no frame");
+  const bool sent = sendFrame(buf, len);
+  Camera::release();
+  if (!sent) return answerFrame(r.requestId, r.channelId, 0, nullptr, "the frame did not go out (the socket is not taking it)");
+  // Seal now, not at the next second: the answer names the seal over this frame, and the lines go out first.
+  sealNow();
+  g_nextSeal = millis() + kSealEveryMs;
+  if (g_stream.mediaOutbox().len || g_stream.indexOutbox().len)
+    return answerFrame(r.requestId, r.channelId, 0, nullptr, "captured and sealed, but the seal lines did not go out yet");
+  uint64_t seq = 0;
+  const char* hash = nullptr;
+  if (!g_stream.lastMediaSeal(seq, hash)) return answerFrame(r.requestId, r.channelId, 0, nullptr, "no seal was made");
+  answerFrame(r.requestId, r.channelId, seq, hash, nullptr);
+  Serial.printf("[seal] frame request %s: seal %llu\n", r.requestId, (unsigned long long)seq);
+}
+
 bool onMessage(const uint8_t* payload, size_t len) {
   static const char kType[] = "\"seal_resume\"";
-  if (!memmem(payload, len, kType, sizeof kType - 1)) return false;
+  static const char kFrame[] = "\"frame_request\"";
+  const bool resume = memmem(payload, len, kType, sizeof kType - 1) != nullptr;
+  if (!resume && !memmem(payload, len, kFrame, sizeof kFrame - 1)) return false;
   JsonDocument msg;
-  if (deserializeJson(msg, payload, len) || strcmp(msg["type"] | "", "seal_resume")) return false;
+  if (deserializeJson(msg, payload, len)) return false;
+  if (!strcmp(msg["type"] | "", "frame_request")) {
+    const char* id = msg["requestId"] | "";
+    const char* ch = msg["channelId"] | "";
+    if (strcmp(ch, CAGI_STREAM_CHANNEL)) answerFrame(id, ch, 0, nullptr, "this channel takes no frame request");
+    else if (g_frameRequest.waiting) answerFrame(id, ch, 0, nullptr, "another frame request is waiting");
+    else if (strlen(id) < sizeof g_frameRequest.requestId) {
+      strcpy(g_frameRequest.requestId, id);
+      strcpy(g_frameRequest.channelId, ch);
+      g_frameRequest.waiting = true;
+    }
+    return true;
+  }
+  if (strcmp(msg["type"] | "", "seal_resume")) return false;
   if (!g_ready) return true;
   // The hashes must outlive the JsonDocument's strings only until resume() copies them.
   DeviceSeal::FileState index{}, media{};

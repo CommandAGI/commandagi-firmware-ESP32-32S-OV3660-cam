@@ -389,6 +389,8 @@ void loop() {
 #if CAGI_DEVICE_SEALS
   // Seal each second and send the lines, also while the operator has the camera off.
   Seal::loop(g_creds);
+  // A frame on demand: captured, sealed and answered now, before the cadence below (README § Sealed stream).
+  Seal::serveFrameRequest(g_cameraOk && g_camDesired);
 #endif
 
   // Control (sensor on/off + cadence) rides a low-rate HTTP poll, decoupled from the frame stream —

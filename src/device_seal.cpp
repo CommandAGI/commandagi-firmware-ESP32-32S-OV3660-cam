@@ -18,6 +18,34 @@ void hex(const uint8_t* b, size_t n, char* out) {
 }
 }  // namespace
 
+namespace {
+bool wireId(const char* s) {
+  const size_t n = s ? strlen(s) : 0;
+  if (n < 1 || n > 96) return false;
+  for (const char* c = s; *c; c++)
+    if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '.' || *c == '_' || *c == ':' || *c == '-'))
+      return false;
+  return true;
+}
+}  // namespace
+
+size_t frameAnswer(char* out, size_t cap, const char* requestId, const char* channelId, uint64_t seq, const char* hash,
+                   const char* refused) {
+  if (!wireId(requestId) || !wireId(channelId)) return 0;
+  int n;
+  if (refused) {
+    for (const char* c = refused; *c; c++)
+      if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20) return 0;
+    n = snprintf(out, cap, "{\"type\":\"frame_sealed\",\"requestId\":\"%s\",\"channelId\":\"%s\",\"refused\":\"%s\"}", requestId, channelId,
+                 refused);
+  } else {
+    if (!hash || strlen(hash) != 64) return 0;
+    n = snprintf(out, cap, "{\"type\":\"frame_sealed\",\"requestId\":\"%s\",\"channelId\":\"%s\",\"seq\":%llu,\"hash\":\"%s\"}", requestId,
+                 channelId, (unsigned long long)seq, hash);
+  }
+  return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
+
 size_t stampOverhead(const char* t) { return 4 + 2 + strlen(t); }
 
 size_t stamp(const uint8_t* jpeg, size_t len, const char* t, uint8_t* out, size_t cap) {
@@ -114,12 +142,12 @@ bool Stream::Part::pending() const {
   return ctx && (ctx->n > 0 || (ctx->media_file[0] && ctx->media_to > ctx->media_from));
 }
 
-bool Stream::Part::seal(const char* t, bool clockSet, const char* block, const char* status, uint64_t& counter) {
+bool Stream::Part::seal(const char* t, bool clockSet, const char* log, const char* status, uint64_t& counter) {
   if (out.len + 2 >= out.cap) return false;
   ctx->clock = clockSet && !clockUnset ? "ntp" : "none";
   ctx->counter = counter;
   char* at = out.buf + out.len;
-  const int n = seal_emit(ctx, t, seq, block, status, at, out.cap - out.len - 1);
+  const int n = seal_emit(ctx, t, seq, nullptr, log, status, at, out.cap - out.len - 1);
   if (n < 0) {
     out.buf[out.len] = 0;
     return false;
@@ -170,11 +198,18 @@ void Stream::resume(const FileState* index, const FileState* media, int64_t last
   if (lastCounter >= 0 && (uint64_t)lastCounter + 1 > counter_) counter_ = (uint64_t)lastCounter + 1;
 }
 
-bool Stream::seal(const char* t, bool clockSet, const char* block, const char* status) {
+bool Stream::seal(const char* t, bool clockSet, const char* log, const char* status) {
   bool ok = true;
-  if (media_.pending()) ok = media_.seal(t, clockSet, block, status, counter_) && ok;
-  if (index_.pending()) ok = index_.seal(t, clockSet, block, status, counter_) && ok;
+  if (media_.pending()) ok = media_.seal(t, clockSet, log, status, counter_) && ok;
+  if (index_.pending()) ok = index_.seal(t, clockSet, log, status, counter_) && ok;
   return ok;
+}
+
+bool Stream::lastMediaSeal(uint64_t& seq, const char*& hash) const {
+  if (!media_.ctx || !media_.ctx->prev[0]) return false;
+  seq = media_.seq - 1;
+  hash = media_.ctx->prev;
+  return true;
 }
 
 }  // namespace DeviceSeal

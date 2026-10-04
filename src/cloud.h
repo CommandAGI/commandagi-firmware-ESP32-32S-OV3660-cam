@@ -53,8 +53,9 @@ bool postAudio(const Creds& c, const uint8_t* buf, size_t len, PostResult* res, 
 // stopped camera can still be remotely turned back on. Fills *ctl; returns false on transport error.
 bool pollControl(const Creds& c, Control* ctl);
 
-// A recent block of the contract's chain (GET <api>/public/chain/block), as the canonical JSON a seal
-// names: {"chain":"solana:devnet","hash":"…","slot":123}. False when the platform has none (503) or the
-// call failed; `out` is then unchanged.
-bool chainBlock(const Creds& c, String& out);
+// The contract log's head (GET <api>/public/contract/head), as the canonical JSON a seal names:
+// {"head":"<64 hex>","seq":123}. The head descends from a beacon, a block the platform logged once a
+// minute, so a seal that names it was made after that block; the device reads no chain. False when the
+// platform has no head or the call failed; `out` is then unchanged.
+bool logHead(const Creds& c, String& out);
 }  // namespace Cloud

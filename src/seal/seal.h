@@ -57,9 +57,10 @@ int seal_line(seal_ctx *c, const char *line, size_t len, uint64_t seq);
 int seal_media(seal_ctx *c, const char *file, uint64_t offset, const uint8_t *bytes, size_t len);
 /*
  * The seal line for everything since the last seal: `t` its time (ISO), `seq` its own seq, `block_json` a recent
- * block as canonical JSON ({"chain":"solana:devnet","hash":"…","slot":123}) or NULL, `status_json` what the device
- * declares (a canonical JSON object, keys sorted) or NULL. Writes the line (no newline) to `out`; returns its length,
- * or -1 (the buffer is too small, or the key would not sign).
+ * block as canonical JSON ({"chain":"solana:devnet","hash":"…","slot":123}) or NULL, `log_json` the contract log's
+ * head as canonical JSON ({"head":"<64 hex>","seq":123}) or NULL, `status_json` what the device declares (a canonical
+ * JSON object, keys sorted) or NULL. Writes the line (no newline) to `out`; returns its length, or -1 (the buffer is
+ * too small, or the key would not sign).
  */
-int seal_emit(seal_ctx *c, const char *t, uint64_t seq, const char *block_json, const char *status_json, char *out, size_t cap);
+int seal_emit(seal_ctx *c, const char *t, uint64_t seq, const char *block_json, const char *log_json, const char *status_json, char *out, size_t cap);
 #endif
