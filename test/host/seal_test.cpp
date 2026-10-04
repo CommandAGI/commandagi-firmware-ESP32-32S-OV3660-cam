@@ -1,0 +1,123 @@
+// Host test of the camera's sealed stream (src/device_seal.cpp over src/seal/seal.c): a camera sends
+// frames for three seconds and seals once a second. It prints the `cam-at` records.jsonl on stdout and
+// writes `video.mjpeg` to argv[1]. The CommandAGI repository's tests/workbench/seal-c.test.mjs builds
+// and runs it, and its JavaScript verifier (packages/domain/world/seals.js verifySeals) must accept both
+// files as they are. TweetNaCl stands in for libsodium's Ed25519 (the same signature scheme):
+//
+//   cc -O2 -c -I<seal-c>/test <seal-c>/test/tweetnacl.c -o /tmp/tweetnacl.o
+//   cc -O2 -c src/seal/seal.c -o /tmp/seal.o
+//   g++ -std=c++17 -O2 -Wall -Werror -Isrc -I<seal-c>/test test/host/seal_test.cpp src/device_seal.cpp
+//       /tmp/seal.o /tmp/tweetnacl.o -o /tmp/seal_test && /tmp/seal_test /tmp/video.mjpeg
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+#include "device_seal.h"
+extern "C" {
+#include "tweetnacl.h"
+void randombytes(unsigned char* x, unsigned long long n) {
+  FILE* f = fopen("/dev/urandom", "rb");
+  if (!f || fread(x, 1, (size_t)n, f) != n) exit(2);
+  fclose(f);
+}
+}
+
+namespace {
+unsigned char g_sk[64];
+int sign(void*, const uint8_t* msg, size_t len, uint8_t sig[64]) {
+  std::vector<unsigned char> sm(len + 64);
+  unsigned long long smlen = 0;
+  if (crypto_sign(sm.data(), &smlen, msg, len, g_sk)) return -1;
+  memcpy(sig, sm.data(), 64);
+  return 0;
+}
+void b64u(const uint8_t* b, size_t n, char* out) {
+  static const char* a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  size_t o = 0;
+  for (size_t i = 0; i < n; i += 3) {
+    uint32_t v = (uint32_t)b[i] << 16 | (i + 1 < n ? (uint32_t)b[i + 1] << 8 : 0) | (i + 2 < n ? b[i + 2] : 0);
+    out[o++] = a[v >> 18 & 63];
+    out[o++] = a[v >> 12 & 63];
+    if (i + 1 < n) out[o++] = a[v >> 6 & 63];
+    if (i + 2 < n) out[o++] = a[v & 63];
+  }
+  out[o] = 0;
+}
+// A JPEG-shaped frame: SOI, an empty SOS header, entropy-coded bytes that never form a marker, EOI.
+std::vector<uint8_t> jpeg(size_t len, int k) {
+  std::vector<uint8_t> f(len);
+  for (size_t i = 0; i < len; i++) f[i] = (uint8_t)((i * 7 + k) % 200);
+  const uint8_t head[] = {0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02};
+  memcpy(f.data(), head, sizeof head);
+  f[len - 2] = 0xFF;
+  f[len - 1] = 0xD9;
+  return f;
+}
+void fail(const char* why) {
+  fprintf(stderr, "FAIL %s\n", why);
+  exit(1);
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc < 2) return 2;
+  unsigned char pk[32];
+  crypto_sign_keypair(pk, g_sk);
+  uint8_t spki[44] = {0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
+  memcpy(spki + 12, pk, 32);
+  char announce[64];
+  b64u(spki, sizeof spki, announce);
+
+  static seal_ctx ctx;
+  static char outbox[65536];
+  DeviceSeal::Stream s;
+  // A camera that rebooted: its seqs and its counter go on from where its last reservation ended.
+  const DeviceSeal::Config cfg = {"ed25519", spki, sizeof spki, announce, false, sign, nullptr, 4097, 2048};
+  if (!s.begin(cfg, &ctx, outbox, sizeof outbox)) fail("begin");
+
+  // Stamping refuses what is not a JPEG and a buffer that is too small.
+  uint8_t small[8];
+  const uint8_t notJpeg[6] = {0, 1, 2, 3, 4, 5};
+  if (DeviceSeal::stamp(notJpeg, sizeof notJpeg, "2026-10-03T12:00:00.000Z", small, sizeof small)) fail("stamped a non-JPEG");
+  const std::vector<uint8_t> tiny = jpeg(8, 0);
+  if (DeviceSeal::stamp(tiny.data(), tiny.size(), "2026-10-03T12:00:00.000Z", small, sizeof small)) fail("stamped into a short buffer");
+  if (s.seal("2026-10-03T12:00:00.000Z", true, nullptr, nullptr)) fail("sealed nothing");
+
+  FILE* media = fopen(argv[1], "wb");
+  if (!media) return 2;
+  const char* block = "{\"chain\":\"solana:devnet\",\"hash\":\"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin\",\"slot\":4242}";
+  const char* status = "{\"boot\":\"unverified\",\"flash\":\"plain\",\"fw\":\"1.3.0\"}";
+  std::vector<uint8_t> stamped;
+  for (int sec = 0; sec < 3; sec++) {
+    for (int k = 0; k < 4; k++) {
+      char t[32];
+      snprintf(t, sizeof t, "2026-10-03T12:00:%02d.%03dZ", sec, 100 + 200 * k);
+      // Sizes that cross the 64 KiB chunk boundaries at different places.
+      const std::vector<uint8_t> f = jpeg(9000 + 23000 * (size_t)k + 1234 * (size_t)sec, sec * 4 + k);
+      stamped.resize(f.size() + DeviceSeal::stampOverhead(t));
+      const size_t n = DeviceSeal::stamp(f.data(), f.size(), t, stamped.data(), stamped.size());
+      if (n != stamped.size()) fail("stamp length");
+      if (!s.room(n)) fail("no room");
+      // The second frame of the first second is lost before it is sent: it is not indexed or sealed.
+      if (sec == 0 && k == 1) continue;
+      fwrite(stamped.data(), 1, n, media);
+      // The clock was not set yet during the first second.
+      if (!s.frameSent(stamped.data(), n, t, sec > 0)) fail("frameSent");
+    }
+    char t[32];
+    snprintf(t, sizeof t, "2026-10-03T12:00:%02d.950Z", sec);
+    if (!s.seal(t, true, sec ? block : nullptr, status)) fail("seal");
+    // The outbox goes out in two parts in the last second, as a socket might take it.
+    if (sec == 2) {
+      const char* nl = strchr(s.outbox(), '\n');
+      const size_t first = (size_t)(nl - s.outbox()) + 1;
+      fwrite(s.outbox(), 1, first, stdout);
+      s.sent(first);
+    }
+    fwrite(s.outbox(), 1, s.outboxLen(), stdout);
+    s.sent(s.outboxLen());
+  }
+  fclose(media);
+  if (s.outboxLen() != 0 || s.nextSeq() != 4097 + 11 + 3 || s.counter() != 2051) fail("seq or counter");
+  return 0;
+}

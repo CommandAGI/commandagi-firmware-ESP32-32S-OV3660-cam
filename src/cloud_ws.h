@@ -17,11 +17,12 @@ void loop();
 bool connected();
 // Send one binary JPEG frame. Returns false if the socket isn't open (caller should skip this frame).
 bool sendFrame(const uint8_t* buf, size_t len);
-#if CAGI_VERIFIED_SKU
-// Send a signed capture-manifest sidecar (a JSON TXT frame) over the same socket. Returns false if the
-// socket isn't open. The manifest rides parallel to the JPEG frames (channel CAGI_MANIFEST_CHANNEL) so
-// the platform can bind it to the frame-chain segment it covers. See manifest.cpp.
-bool sendManifest(const String& json);
+#if CAGI_DEVICE_SEALS
+// The sealed camera's two messages (src/seal_runtime.cpp). A stamped frame as an addressed `frame`
+// message (data URL), and index and seal lines as a `data` message whose text is the lines, newline-
+// terminated, exactly as the device sealed them. Return false when the socket is not open.
+bool sendFrameJson(const char* channelId, const uint8_t* jpeg, size_t len);
+bool sendLines(const char* channelId, const char* kind, const char* lines, size_t len);
 #endif
 // Send one JSON text message (e.g. the runtime `status`). Only the loop's task may call it.
 bool sendText(const String& json);

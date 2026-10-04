@@ -46,4 +46,9 @@ bool postAudio(const Creds& c, const uint8_t* buf, size_t len, PostResult* res, 
 // Fetch the desired sensor state without streaming anything — used while idle (cam+mic both off) so a
 // stopped camera can still be remotely turned back on. Fills *ctl; returns false on transport error.
 bool pollControl(const Creds& c, Control* ctl);
+
+// A recent block of the contract's chain (GET <api>/public/chain/block), as the canonical JSON a seal
+// names: {"chain":"solana:devnet","hash":"…","slot":123}. False when the platform has none (503) or the
+// call failed; `out` is then unchanged.
+bool chainBlock(const Creds& c, String& out);
 }  // namespace Cloud

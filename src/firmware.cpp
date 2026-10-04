@@ -23,17 +23,7 @@
 #include "cloud.h"
 #include "cloud_ws.h"
 #include "ble_prov.h"
-#include "tamper.h"
-#include "manifest.h"
-#if CAGI_SENSOR_LIDAR
-#include "sensors/lidar.h"
-#endif
-#if CAGI_SENSOR_THERMAL
-#include "sensors/thermal.h"
-#endif
-#if CAGI_SENSOR_EMI
-#include "sensors/emi.h"
-#endif
+#include "seal_runtime.h"
 
 namespace {
 Creds g_creds;
@@ -53,10 +43,6 @@ uint32_t g_nextControl = 0;
 uint32_t g_retryAt = 0;
 uint32_t g_lastStreamOkMs = 0;  // last time a frame went out — gates BLE stop/revive (radio sharing)
 uint32_t g_wsStartedAt = 0;     // when we opened the frame WebSocket — re-register if it won't connect
-#if CAGI_VERIFIED_SKU
-uint32_t g_nextManifest = 0;    // when to emit the next signed capture manifest (sidecar)
-uint32_t g_manifestSeq = 0;     // capture-window sequence the manifest binds to
-#endif
 uint32_t g_captureFails = 0;  // consecutive Camera::capture() failures (for surfacing + sensor recovery)
 #define CAGI_RUNTIME_STATUS (CAGI_CELLULAR_ENABLED || CAGI_BATTERY_ADC_PIN >= 0)
 #if CAGI_CELLULAR_ENABLED
@@ -265,6 +251,11 @@ void setup() {
   // starves NimBLE (it asserts on a null mutex handle and boot-loops). BLE-first reserves its memory,
   // and wiring the STATUS notifier before the camera means a camera failure still notifies the app.
   BleProv::begin();
+#if CAGI_DEVICE_SEALS
+  // After BleProv::begin(): the radio is on, so a first boot's key is truly random. Before the mic
+  // refreshes INFO, so INFO carries the key. Its buffers are in PSRAM, not the camera's DMA RAM.
+  Seal::begin();
+#endif
 
   g_cameraOk = Camera::begin();
   g_audioOk = Audio::begin();  // optional mic — false (and harmless) if absent
@@ -276,21 +267,6 @@ void setup() {
   Battery::begin();
 #endif
 
-#if CAGI_VERIFIED_SKU
-  // Verified-camera SKU: bring up the tamper latch, corroborating sensors, and the manifest signer.
-  // All of these are no-ops on a build that didn't compile them in.
-  Tamper::begin();
-#if CAGI_SENSOR_LIDAR
-  Sensors::Lidar::begin();
-#endif
-#if CAGI_SENSOR_THERMAL
-  Sensors::Thermal::begin();
-#endif
-#if CAGI_SENSOR_EMI
-  Sensors::Emi::begin();
-#endif
-  Manifest::begin();
-#endif
   if (!g_cameraOk && !g_audioOk) Status::set("error", "no camera or mic");
   else if (!g_cameraOk) Status::set("error", "camera init failed");
 
@@ -306,6 +282,9 @@ void loop() {
 #ifdef CAGI_CAMTEST
   delay(1000);  // diagnostic build: the probe ran once in setup(); nothing else to do
   return;
+#endif
+#if CAGI_DEVICE_SEALS
+  Seal::serial();  // the factory reads the key and stores its certificate chain here, before any creds
 #endif
   // The app wrote fresh creds — reload and force a clean reconnect (possibly a new account).
   if (BleProv::consumeNewProvisioning()) {
@@ -380,6 +359,11 @@ void loop() {
     return;
   }
 
+#if CAGI_DEVICE_SEALS
+  // Seal each second and send the lines, also while the operator has the camera off.
+  Seal::loop(g_creds);
+#endif
+
   // Control (sensor on/off + cadence) rides a low-rate HTTP poll, decoupled from the frame stream —
   // the WS frame path carries no per-frame response, so this is how a streaming camera learns about a
   // mic toggle or an fps change from the dashboard.
@@ -410,7 +394,11 @@ void loop() {
     size_t len = 0;
     if (Camera::capture(&buf, &len)) {
       g_captureFails = 0;
+#if CAGI_DEVICE_SEALS
+      bool sent = Seal::sendFrame(buf, len);  // stamped, sent, indexed and sealed by the device
+#else
       bool sent = CloudWs::sendFrame(buf, len);
+#endif
       Camera::release();
       if (sent) {
         noteStreamOk();
@@ -472,18 +460,6 @@ void loop() {
   if (wsUp && (int32_t)(now - g_nextRuntimeStatus) >= 0) {
     sendRuntimeStatus();
     g_nextRuntimeStatus = millis() + CAGI_RUNTIME_STATUS_MS;
-  }
-#endif
-
-#if CAGI_VERIFIED_SKU
-  // Verified SKU: emit a signed capture manifest sidecar on its own cadence while the frame socket is
-  // up. It describes the current window (fw, boot state, case-intact, live modalities) and is signed so
-  // the claim can't be forged in transit; the platform re-verifies it and recomputes coherence from the
-  // actual frames. Also poll the tamper switch here so a mid-stream opening is caught promptly.
-  Tamper::poll();
-  if (CloudWs::connected() && now >= g_nextManifest) {
-    Manifest::emit(g_manifestSeq++);
-    g_nextManifest = millis() + CAGI_MANIFEST_INTERVAL_MS;
   }
 #endif
 

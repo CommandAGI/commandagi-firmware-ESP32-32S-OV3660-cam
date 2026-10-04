@@ -84,45 +84,4 @@ bool openSealed(const uint8_t* wire, size_t wireLen, const char* pin, const uint
   return ok;
 }
 
-#if CAGI_VERIFIED_SKU
-// ── Ed25519 (verified SKU) ───────────────────────────────────────────────────────────────────────
-// Ed25519 keeps the SAME signature the platform's vc.ts produces, so a manifest signed here verifies
-// under verifyManifest(). Two custodies (see crypto.h). The software path uses mbedtls' Ed25519 (via
-// the Everest impl shipped with recent mbedtls builds); if a given Arduino-ESP32 mbedtls lacks it,
-// swap in a vendored ref implementation (e.g. orlp/ed25519) — the interface below does not change.
-
-String ed25519PubKeyHex(const uint8_t seed32[32]) {
-#if CAGI_SECURE_ELEMENT
-  (void)seed32;
-  // TODO(hardware): read the ATECC608's stored public key for the manifest signing slot and hex it.
-  //   atcab_get_pubkey(SLOT, pub64); return toHex(pub64, 32-of-the-64 per the Ed25519 encoding);
-  return String();  // stub until the SE lib is wired
-#else
-  // TODO(driver): derive the Ed25519 public key from the seed. With mbedtls Ed25519:
-  //   mbedtls_ed25519 keypair from seed → export 32-byte public key → toHex(pub, 32).
-  // Kept as a documented stub so the verified build links without pinning a specific crypto lib.
-  (void)seed32;
-  return String();
-#endif
-}
-
-String ed25519SignHex(const uint8_t* msg, size_t len, const uint8_t seed32[32]) {
-#if CAGI_SECURE_ELEMENT
-  (void)seed32;
-  // TODO(hardware): hand `msg`/`len` to the SE to sign with its protected Ed25519 key (the key never
-  // enters ESP32 RAM). atcab_sign / the part's Ed25519 op → 64-byte sig → toHex(sig, 64).
-  (void)msg;
-  (void)len;
-  return String();  // stub until the SE lib is wired
-#else
-  // TODO(driver): software Ed25519 sign over the raw message bytes with `seed32`:
-  //   ed25519_sign(sig64, msg, len, pub, priv-from-seed); return toHex(sig64, 64).
-  (void)msg;
-  (void)len;
-  (void)seed32;
-  return String();  // stub until the crypto lib is wired
-#endif
-}
-#endif  // CAGI_VERIFIED_SKU
-
 }  // namespace Crypto

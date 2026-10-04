@@ -13,8 +13,7 @@ cd commandagi-firmware-ESP32-32S-OV3660-cam
 The repository name identifies the requested hardware target. The checked-in PlatformIO default
 currently uses the AI-Thinker `esp32cam` board with OV2640 wiring; an ESP32-32S/OV3660 build has not
 been verified in this cleanup. Review `platformio.ini` and `src/config.h` against your exact board
-before flashing. The verified-camera design documents describe additional hardware, not a claim
-that those peripherals are implemented or certified.
+before flashing.
 
 
 Turn a ~$6 **AI-Thinker ESP32-CAM** into a camera that streams into your CommandAGI dashboard. You
@@ -37,13 +36,8 @@ its own. See [the hardware notes](hardware/README.md) for the board and security
 - A USB-UART adapter (FTDI/CP2102) for the first flash, or an ESP32-CAM-MB programmer board.
 - Other boards (e.g. ESP32-S3 cams) work by editing the pin map in [`src/config.h`](src/config.h) and
   adding `-DCAM_BOARD_ESP32S3` to `build_flags`.
-- **Verified-camera SKU** (a higher-tier board): ESP32-S3 + a secure element holding the signing key +
-  a chassis tamper switch + corroborating sensors (LiDAR / thermal-IR / EMI). It signs a per-window
-  capture manifest and streams it as a sidecar so the platform can prove the pixels came from a genuine,
-  unopened, multi-modal device — much harder to fool with a screen/print replay. See
-  [`hardware/README.md`](hardware/README.md) for the BOM + the "tamper-evident, not tamper-proof"
-  caveat, and build it with `pio run -e esp32cam-verified -t upload`. It stays **re-flashable** (no
-  eFuse burns — the key's confidentiality comes from the secure element, not from locking the board).
+- A **sealing** build (`-DCAGI_DEVICE_SEALS=1`, env `esp32cam-s3-seals`, and CommandAGI-Cam-002) signs
+  its own frames with a key made on the device (§ Sealed stream).
 
 ## Flashing
 
@@ -69,7 +63,9 @@ reset where GPIO0 is held low — so no firmware can ever block re-flashing. The
 permanently lock a board is **burning an eFuse** (Secure Boot, Flash Encryption, or the
 download-disable bit), and this firmware does **none** of that:
 
-- No `esp_efuse_*` / `esp_secure_boot_*` / `esp_flash_encrypt_*` calls anywhere in `src/`.
+- No `esp_efuse_*` call anywhere in `src/`. The only `esp_secure_boot_*` / `esp_flash_encrypt*` calls are
+  the read-only `esp_secure_boot_enabled()` and `esp_flash_encryption_enabled()` (a sealing build
+  reports them in its seals); they change nothing.
 - No Secure Boot / Flash Encryption build flags — `platformio.ini` produces a plain, unencrypted image.
 - The partition table's `Flags` column is empty (no `encrypted` partitions).
 - `factory-reset` calls `Preferences.clear()` on just the `cagi` NVS namespace — never `nvs_flash_erase()`
@@ -88,7 +84,7 @@ contract is shared with the apps in ``packages/domain/core/src/esp32cam.ts`` (pl
 
 | Characteristic | UUID suffix | Props         | Payload                                                                      |
 | -------------- | ----------- | ------------- | ---------------------------------------------------------------------------- |
-| INFO           | `…0002`     | read          | `{ kind, model, fw, hwid, name, provisioned, mic, spk?, secure, salt? }`     |
+| INFO           | `…0002`     | read          | `{ kind, model, fw, hwid, name, provisioned, mic, spk?, secure, salt?, sealKey? }` |
 | STATUS         | `…0003`     | read + notify | `{ state, ip?, sessionId?, deviceId?, error?, link?, operator?, rssi?, rsrp?, battery? }` |
 | PROVISION      | `…0004`     | write         | PIN-sealed `{ ssid, psk, apiBaseUrl, apiKey, deviceName?, apn?, simPin? }` (see _Security_) |
 | COMMAND        | `…0005`     | write         | `identify` \| `reboot` \| `factory-reset`                                    |
@@ -275,6 +271,77 @@ The same protocol as `packages/runtime/host-core/src/client.ts`.
 The mic keeps recording. The main loop does not post a clip recorded while the speaker played (plus
 300 ms), so the platform does not hear the device's own voice. This is a duck, not echo cancellation.
 
+## Sealed stream (`-DCAGI_DEVICE_SEALS=1`)
+
+The camera seals its own stream, so a verifier can check which key recorded the frames and that nobody
+changed, dropped, added or moved one afterwards. The format is CommandAGI's (`docs/integrity.md` in the
+CommandAGI repository, § sealed streams). The sealer is `src/seal/seal.{h,c}`, a verbatim copy of
+CommandAGI's `deployments/clients/seal-c` (that repository's `tests/workbench/seal-c.test.mjs` checks
+the two are the same). Default is off (`0`). `esp32cam-s3-seals` and both CommandAGI-Cam-002 envs turn
+it on; any env builds with it.
+
+**The key.** On its first boot the device makes an Ed25519 key (32 random bytes from
+`esp_fill_random()` while the radio is on; libsodium signs) and keeps it in NVS, namespace `cagi-seal`.
+A factory-reset does not erase it: the key is the unit's identity, not the owner's. The key is in plain
+flash unless the build has flash encryption with NVS encryption (§ Not done). Each seal says so in its
+`status`: `{"boot":"verified|unverified","flash":"encrypted|plain","fw":"…"}` (what
+`esp_secure_boot_enabled()` and `esp_flash_encryption_enabled()` return). That is the device's own
+claim, signed.
+
+**What it writes.** Two channels, both declared `seals: "device"` in the `channels` message:
+
+| channel | medium | what |
+| --- | --- | --- |
+| `cam` | video (`video.mjpeg`) | each frame, stamped first: a JPEG COM segment `t=<ISO time>` right after SOI (CommandAGI's `mjpeg.js` `stampFrame`) |
+| `cam-at` | records (`byte-ranges`) | one line per frame sent, `{"t","seq","src":"device","kind":"event","frame":{"offset","length","sha256"}}`, and the seals |
+
+About once a second, a seal line covers the `cam-at` lines and the `video.mjpeg` bytes since the seal
+before it (RFC 9162 Merkle roots, 64 KiB media chunks). It names a recent block, fetched from
+`GET <api>/public/chain/block` every 10 s, so the frames after it were made after that block. Its
+`clock` is `ntp` when SNTP set the clock before every line it covers, else `none`. The first seal after
+a boot announces the key: the factory's certificate chain when the unit has one, else the bare key
+(`spki`). Seqs and seal counters never go back, also across a reboot: the device reserves them in NVS
+4096 seqs and 1024 counters at a time, so a reboot leaves a gap.
+
+**The wire** (the realtime socket). A frame is sent only when it can be indexed, and it is indexed only
+when it was sent:
+
+```json
+{"type":"frame","channelId":"cam","kind":"camera","url":"data:image/jpeg;base64,<the stamped frame>"}
+{"type":"data","channelId":"cam-at","kind":"events","format":"jsonl","url":"data:text/plain;base64,<lines, each ending in \n>"}
+```
+
+A sealing build does not send bare binary frames (the platform does not record those). The lines wait
+in a 64 kB outbox until the socket takes them; while it is full, no frame is sent.
+
+**The certificate.** The factory certifies the key with CommandAGI's `scripts/integrity/device-ca.mjs`
+(`--key software --envelope none` for Cam-002). On the bench, before the unit has creds:
+
+```sh
+python3 tools/seal-provision.py spki /dev/ttyACM0 > unit.spki.pem
+node scripts/integrity/device-ca.mjs issue --env dev --spki unit.spki.pem --product CommandAGI-Cam-002 \
+  --serial <serial> --key software --envelope none > unit.chain.pem      # in the CommandAGI repository
+python3 tools/seal-provision.py chain /dev/ttyACM0 unit.chain.pem
+```
+
+The serial commands are `seal-spki` (the key as PEM), `seal-chain <JSON array of base64 DER, leaf
+first>` (refused unless the leaf holds this unit's key), `seal-chain-clear` and `seal-status`. BLE INFO
+also carries the key (`sealKey`, base64url SPKI).
+
+**Not done.**
+
+- No board ran it. The host test (`test/host/seal_test.cpp`) and the builds are all that was checked.
+- Production protection of the key: secure boot v2 and flash encryption in release mode, with NVS
+  encryption (an `nvs_keys` partition) so that the key in NVS is encrypted too. Flash encryption alone
+  does not encrypt NVS. These burn eFuses and need the owner's signing key, so no env enables them; the
+  seals say `flash: plain` until one does.
+- A reboot, or a frame lost after `sendTXT` returned, breaks the seal chain in the recorder's file: the
+  device starts its media offsets at 0 and its `prev` at none after a reboot, while the recorder
+  continues the same `video.mjpeg` and `records.jsonl`. The verifier then reports the break; it does
+  not repair it.
+- The platform side (CommandAGI `docs/next.md` § integrity): its runtime ingress throttles the frames
+  it records and rewrites a `data` line, so it does not yet keep these frames and lines byte for byte.
+
 ## Remote sensor control
 
 While streaming, each frame/audio POST response carries the operator's desired sensor state
@@ -306,7 +373,7 @@ remotely (it never needs a power-cycle to resume).
 
 Write `factory-reset` to the COMMAND characteristic from the app (or call `Store::factoryReset()`).
 It erases the `cagi` NVS namespace and reboots back into BLE-advertising mode. The firmware is
-untouched.
+untouched, and so is the sealing key (`cagi-seal`).
 
 ## Layout
 
@@ -324,13 +391,18 @@ src/
   speaker.*         speaker: I2S TX, fetch, decode, play, results (optional, S3 only)
   cellular.*        LTE modem: power, AT setup, PPP into lwIP (optional, cellular envs)
   battery.*         cell voltage / percent / charging (optional)
+  seal/             seal.h, seal.c: CommandAGI's deployments/clients/seal-c, verbatim (plain C)
+  device_seal.*     the sealed camera stream: stamp, index, seal, outbox (plain C++, host-tested)
+  seal_runtime.*    the key in NVS, libsodium Ed25519, SNTP, the block, the serial commands (optional)
   CMakeLists.txt    the ESP-IDF main component (cellular envs only)
   idf_component.yml esp32-camera from the ESP-IDF registry (cellular envs only)
 CMakeLists.txt      the ESP-IDF project file (cellular envs only)
 sdkconfig.defaults.*  Arduino's sdkconfig + PPP, per SoC (cellular envs only)
   clip.*            speaker clip decoder: WAV PCM16 / MP3 → mono PCM16 (plain C++, host-tested)
   third_party/      minimp3.h (CC0, github.com/lieff/minimp3 at ea99364f)
-test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++
+test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++;
+                    seal_test.cpp: the sealed stream, verified by CommandAGI's JavaScript verifier
+tools/              batch-flash.mjs, read-suffix.py (labels); seal-provision.py (the key's certificate)
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
 ```
@@ -359,3 +431,14 @@ g++ -std=c++17 -O1 -Wall -Isrc test/host/clip_test.cpp src/clip.cpp -o /tmp/clip
 This is compilation and a host test only. No board ran this firmware: the PDM mic, the capture task,
 the speaker, the WebSocket messages, the video rate with the mic on, the modem sequence, PPP, the
 `AT+CPSI?` RSRP field order and the battery reading are not verified on hardware.
+
+## Build verification (2026-10-03, branch `integrity-seals`)
+
+PlatformIO 6.2.0 compiled `esp32cam`, `esp32cam-s3`, `esp32cam-s3-seals`, `esp32cam-cellular`,
+`esp32cam-s3-cellular`, `esp32cam` with `-DCAGI_DEVICE_SEALS=1`, and
+`hardware/CommandAGI-Cam-002/firmware` (`commandagi-cam-002`, `commandagi-cam-002-battery`, both with
+the sealed stream). The sealed stream adds about 137 kB of flash (most of it libsodium) and 4.7 kB of
+static RAM; the sealer's state (49 kB) and the outbox (64 kB) are in PSRAM. `test/host/seal_test.cpp`
+passed in CommandAGI's `tests/workbench/seal-c.test.mjs`: its `cam-at` lines and `video.mjpeg` verify
+in JavaScript, every index line names the bytes and stamp of its frame, and a lost frame or a changed
+line breaks the seal. No board ran this firmware.

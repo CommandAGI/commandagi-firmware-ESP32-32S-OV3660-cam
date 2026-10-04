@@ -57,45 +57,34 @@ No Secure Boot / Flash Encryption / download-disable eFuse, ever. Serial downloa
 ROM, so GPIO0→GND + reset always recovers a board regardless of firmware state. `factory-reset` wipes
 only the `cagi` NVS namespace, never the app. See README → _Why it can ALWAYS be re-flashed_.
 
-## Verified SKU: manifest is EVIDENCE, not authority
+## Sealed stream: one writer, byte for byte
 
-The verified build (`-DCAGI_VERIFIED_SKU`, env `esp32cam-verified`) signs a `CaptureManifest`
-(`src/manifest.cpp`, mirroring `packages/domain/core/src/integrity.ts`) each ~2 s and streams it as a JSON
-sidecar over the same frame socket (`CloudWs::sendManifest`). It carries what the device claims about
-ITSELF — firmware, boot state, the tamper switch's `caseIntact`, and which sensor modalities are live —
-signed so the claim can't be forged in transit. But the device does **not** get to set its own
-integrity score: the platform re-verifies the signature and **recomputes** cross-modal coherence from
-the actual frames (`capture-coherence.ts`). `selfCoherence` in the manifest is only a hint (we emit a
-neutral `1`). The signing message pre-image is byte-identical to `manifestSigningMessage()`
-(`cagi-manifest:v1|seq|fw|bootState|caseIntact(1/0)|modalities.join(",")|selfCoherence`), so a manifest
-signed on-device verifies under `verifyManifest()`. Signing is **fail-closed**: no key ⇒ no manifest,
-never an unsigned/forgeable one.
+The sealing build (`-DCAGI_DEVICE_SEALS`) replaces the old verified-SKU capture manifest, which signed a
+claim about each window but not the frames. Now the device signs the frames themselves: a seal's media
+root covers the exact bytes of `video.mjpeg`, and each `cam-at` line names one frame's offset, length
+and sha256. So the device must be the only writer of both, and the recorder must keep them byte for
+byte. Two rules follow in `src/seal_runtime.cpp`:
 
-## Verified SKU: no measured boot ⇒ bootState is "unverified"
+- A frame is indexed only after `sendFrameJson` returned true, and sent only when its index line fits
+  (`Stream::room`). A frame that was not sent leaves no line and no media bytes.
+- The stamp (`t=` COM segment) is made on the device before the hash. Nobody stamps the frame again.
 
-Because we never burn Secure Boot eFuses (re-flashability is a hard requirement), the standard verified
-build cannot honestly claim measured boot — `manifest.cpp` reports `bootState = "unverified"`. Only a
-build with a genuine measured-boot attestation (e.g. anchored through the secure element) should report
-`"secure"`. Don't be tempted to hardcode `"secure"` to look stronger; the platform treats it as a
-claim and an unverifiable one buys nothing.
+## Sealed stream: what a reboot costs
 
-## Verified SKU: tamper is EVIDENT, not PROOF
+Seqs and seal counters must only increase, also across reboots, but NVS cannot take a write per line.
+So `seal_runtime.cpp` reserves 4096 seqs and 1024 counters in NVS ahead of use, and a reboot skips the
+rest of the block (a seq gap, which a reader reports). The media offset and the previous seal's hash
+are not kept: after a reboot they start again at 0 and none. If the recorder continues the same stream
+file, the verifier reports a break there. Fixing that needs the recorder to start a new file or to tell
+the device where its file is; it is not the device's to guess.
 
-`src/tamper.cpp` latches an irreversible "case was opened" flag on the first broken-loop reading. On a
-non-SE build that latch is an NVS flag (best-effort — an attacker who can reflash/wipe NVS can clear
-it). On the `-DCAGI_SECURE_ELEMENT` build the authoritative latch is the SE's tamper input: tripping it
-locks the protected key, so an opened unit can no longer sign at all, and clearing it needs a factory SE
-re-attestation. The seed for the non-SE signer must be persisted at provisioning time (NVS key
-`devseed`) — `TODO(provisioning)` in `manifest.cpp`; until `ble_prov.cpp` writes it, a non-SE verified
-build has no signer and `Manifest::emit` no-ops.
+## Sealed stream: the key and the board's locks
 
-## Verified SKU: sensor HALs are stubs with honest TODOs
-
-`src/sensors/{lidar,thermal,emi}.{h,cpp}` define clean, part-agnostic driver interfaces (a depth frame,
-a thermal frame, an EMI spectrum) but ship as documented stubs that report `present() == false` until a
-real part is wired (each names the reference part + the exact driver calls to fill in). That is
-deliberate: the manifest/coherence plumbing is complete and testable end-to-end, and a bring-up just
-fills a `read()` per populated sensor without touching the wiring above it.
+The key is made on the device and never leaves it: the serial port and BLE give out only the public
+key. The default builds keep the "always re-flashable" rule, so the key sits in plain NVS and the seals
+say `flash: plain`, `boot: unverified`. A production build needs secure boot v2, flash encryption in
+release mode and NVS encryption (flash encryption alone leaves NVS in the clear). Those burn eFuses for
+good and need the owner's signing key, so no env here turns them on.
 
 ## Audio on the ESP32-S3: two I2S ports, no camera conflict
 

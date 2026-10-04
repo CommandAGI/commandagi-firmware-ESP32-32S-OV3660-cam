@@ -5,6 +5,7 @@
 #include "store.h"
 #include "status.h"
 #include "crypto.h"
+#include "seal_runtime.h"
 
 namespace {
 NimBLECharacteristic* g_info = nullptr;
@@ -49,26 +50,11 @@ String infoJson() {
 #if CAGI_PROV_SECURE
   d["salt"] = g_saltHex;  // the app derives the PIN key from this + the PIN
 #endif
-#if CAGI_VERIFIED_SKU
-  // Verified-camera SKU capabilities (mirror DeviceInfo in packages/domain/core/src/deviceProvisioning.ts).
-  // The provisioning flow persists these into the device record (Phase 2a columns) so the platform's
-  // integrity scoring knows the source's true physical hardness. Always "rgb"; add each present sensor.
-  JsonArray sensors = d["sensors"].to<JsonArray>();
-  sensors.add("rgb");
-#if CAGI_SENSOR_LIDAR
-  sensors.add("lidar");
-#endif
-#if CAGI_SENSOR_THERMAL
-  sensors.add("ir");
-#endif
-#if CAGI_SENSOR_EMI
-  sensors.add("emi");
-#endif
-  d["tamper"] = (bool)CAGI_TAMPER_ENABLED;         // chassis tamper switch present
-  d["secureElement"] = (bool)CAGI_SECURE_ELEMENT;  // signing key held in a discrete SE
-  // NOTE(provisioning): on the SE build, also advertise the SE factory attestation certificate here as
-  // d["attestCert"] once the SE lib is wired (read it from the SE), so the platform can verify the
-  // signing key was generated inside a genuine secure element on this unit.
+#if CAGI_DEVICE_SEALS
+  // The key that seals this unit's stream (base64url SubjectPublicKeyInfo). It names nothing by itself:
+  // a certificate from the factory (README § Sealed stream) says whose unit it is.
+  const String key = Seal::spki();
+  if (key.length()) d["sealKey"] = key;
 #endif
   String out;
   serializeJson(d, out);

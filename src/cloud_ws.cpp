@@ -5,6 +5,10 @@
 #include "status.h"
 #include "speaker.h"
 #include "clip.h"
+#if CAGI_DEVICE_SEALS
+#include <esp_heap_caps.h>
+#include "mbedtls/base64.h"
+#endif
 
 namespace {
 WebSocketsClient ws;
@@ -29,6 +33,8 @@ String hostFromBase(const String& base) {
 // under 15 kB; a larger clip must come as a `url`.
 
 // Tell the DO our display channel so a realtime camera view appears (and the recorder knows the kind).
+// A sealing build declares each stream as a channel of the device that seals it itself: the recorder
+// then keeps the device's frames and lines byte for byte (docs/integrity.md in CommandAGI).
 void announceChannel() {
   JsonDocument d;
   d["type"] = "channels";
@@ -37,10 +43,55 @@ void announceChannel() {
   c0["channelId"] = CAGI_STREAM_CHANNEL;  // "cam"
   c0["kind"] = "camera";
   c0["label"] = g_channelName;
+#if CAGI_DEVICE_SEALS
+  JsonObject ch = c0["channel"].to<JsonObject>();
+  ch["id"] = CAGI_STREAM_CHANNEL;
+  ch["dir"] = "out";
+  ch["medium"] = "video";
+  ch["format"] = "video";
+  ch["seals"] = "device";
+  JsonObject c1 = arr.add<JsonObject>();
+  c1["channelId"] = CAGI_SEAL_INDEX_CHANNEL;  // "cam-at": one line per frame, and the seals
+  c1["kind"] = "events";
+  c1["label"] = "Frame index";
+  JsonObject ix = c1["channel"].to<JsonObject>();
+  ix["id"] = CAGI_SEAL_INDEX_CHANNEL;
+  ix["dir"] = "out";
+  ix["medium"] = "records";
+  ix["format"] = "byte-ranges";
+  ix["seals"] = "device";
+#endif
   String out;
   serializeJson(d, out);
   ws.sendTXT(out);
 }
+
+#if CAGI_DEVICE_SEALS
+// One growing PSRAM buffer for a message: prefix, base64 of the bytes, suffix. Only the loop's task
+// sends, so one buffer is enough.
+uint8_t* g_msg = nullptr;
+size_t g_msgCap = 0;
+
+bool sendBase64(const char* prefix, const uint8_t* bytes, size_t len, const char* suffix) {
+  const size_t pre = strlen(prefix), suf = strlen(suffix), b64 = (len + 2) / 3 * 4;
+  const size_t need = pre + b64 + suf + 1;
+  if (need > g_msgCap) {
+    free(g_msg);
+    g_msgCap = need + 16 * 1024;
+    g_msg = (uint8_t*)heap_caps_malloc(g_msgCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_msg) g_msg = (uint8_t*)malloc(g_msgCap);
+    if (!g_msg) {
+      g_msgCap = 0;
+      return false;
+    }
+  }
+  memcpy(g_msg, prefix, pre);
+  size_t n = 0;
+  if (mbedtls_base64_encode(g_msg + pre, g_msgCap - pre, &n, bytes, len) != 0) return false;
+  memcpy(g_msg + pre + n, suffix, suf);
+  return ws.sendTXT(g_msg, pre + n + suf);
+}
+#endif
 
 #if CAGI_SPEAKER_ENABLED
 // The speaker as an output plus the presence controls that drive it. The schemas are the ones
@@ -221,10 +272,19 @@ bool sendFrame(const uint8_t* buf, size_t len) {
   return ws.sendBIN(buf, len);
 }
 
-#if CAGI_VERIFIED_SKU
-bool sendManifest(const String& json) {
+#if CAGI_DEVICE_SEALS
+bool sendFrameJson(const char* channelId, const uint8_t* jpeg, size_t len) {
   if (!g_started || !g_connected) return false;
-  return ws.sendTXT(json.c_str(), json.length());
+  char prefix[128];
+  snprintf(prefix, sizeof prefix, "{\"type\":\"frame\",\"channelId\":\"%s\",\"kind\":\"camera\",\"url\":\"data:image/jpeg;base64,", channelId);
+  return sendBase64(prefix, jpeg, len, "\"}");
+}
+
+bool sendLines(const char* channelId, const char* kind, const char* lines, size_t len) {
+  if (!g_started || !g_connected) return false;
+  char prefix[160];
+  snprintf(prefix, sizeof prefix, "{\"type\":\"data\",\"channelId\":\"%s\",\"kind\":\"%s\",\"format\":\"jsonl\",\"url\":\"data:text/plain;base64,", channelId, kind);
+  return sendBase64(prefix, (const uint8_t*)lines, len, "\"}");
 }
 #endif
 

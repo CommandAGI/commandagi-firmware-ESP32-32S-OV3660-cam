@@ -240,136 +240,19 @@
 // realtime socket is open (also on connect and on a link change). Cellular and battery builds only.
 #define CAGI_RUNTIME_STATUS_MS 60000
 
-// ── Verified-camera SKU (multi-modal + tamper-evident) ──────────────────────────────────────────
-// The verified SKU is a SEPARATE board build: an ESP32 plus a secure element (ATECC608-class), a
-// chassis tamper switch (or conductive mesh), and one or more corroborating sensors (LiDAR / thermal /
-// EMI). It signs a per-window {@link CaptureManifest} (packages/domain/core integrity.ts) describing its
-// firmware, boot state, case-intact reading, and active modalities, and streams it as a sidecar
-// alongside frames. The platform RE-VERIFIES everything and recomputes cross-modal coherence from the
-// actual frames — the device never self-certifies its own integrity strength.
-//
-// ALL of this is behind CAGI_VERIFIED_SKU (OFF by default) so the stock AI-Thinker camera build is
-// byte-for-byte unchanged. Per-sensor flags gate each HAL driver independently — a unit with LiDAR but
-// no thermal sets only CAGI_SENSOR_LIDAR. Enable at build time, e.g.:
-//
-//     PLATFORMIO_BUILD_FLAGS="-DCAGI_VERIFIED_SKU=1 -DCAGI_SENSOR_LIDAR=1 -DCAGI_SENSOR_THERMAL=1
-//       -DCAGI_SENSOR_EMI=1 -DCAGI_SECURE_ELEMENT=1" pio run -e esp32cam-verified -t upload
-//
-// HARD CONSTRAINT (docs/architecture/platform/CAMERAS.md): the verified SKU stays USB-re-flashable forever. We do
-// NOT burn Secure Boot / Flash Encryption eFuses — the signing key's confidentiality comes from the
-// secure element (it never leaves the SE), NOT from locking the board. Re-flashability is preserved.
-#ifndef CAGI_VERIFIED_SKU
-#define CAGI_VERIFIED_SKU 0
+// ── Sealed stream (the device seals its own frames) ────────────────────────────────────────────
+// OFF by default. A build with -DCAGI_DEVICE_SEALS=1 makes an Ed25519 key on its first boot (NVS
+// namespace `cagi-seal`), stamps each frame with its capture time, indexes it in the `cam-at` channel
+// and seals the index and the frames once a second with deployments/clients/seal-c (src/seal/). Both
+// channels are declared `seals: "device"`, so the recorder keeps them byte for byte. Frames then go as
+// addressed `frame` messages, not bare binary. README § Sealed stream; docs/integrity.md in CommandAGI.
+#ifndef CAGI_DEVICE_SEALS
+#define CAGI_DEVICE_SEALS 0
 #endif
-
-// The signing key lives in a discrete secure element over I2C instead of NVS. When 1, manifest.cpp asks
-// the SE to sign (the private key never enters ESP32 RAM). When 0 on a verified build, the manifest is
-// signed with the NVS-stored device seed (the `device_key` tier).
-//
-// CRITICAL PART CONSTRAINT (hardware/VERIFIED_SKU.md §3): the platform verifies **Ed25519** (integrity.ts
-// verifyFrameChain/verifyManifest use @noble/ed25519). The reflexive ATECC608 does **ECDSA P-256 ONLY —
-// no Ed25519** — so it CANNOT sign what the platform accepts. The recommended SE is therefore an
-// Ed25519-capable part: **NXP SE050** (EdDSA/Ed25519 native, attested keygen), or Microchip TA100 /
-// Infineon OPTIGA Trust M (verify the rev supports Ed25519). Using a P-256-only SE would force a second
-// platform verification path + a per-device sigAlg field (a real fragmentation cost) — see §3.1.
-#ifndef CAGI_SECURE_ELEMENT
-#define CAGI_SECURE_ELEMENT 0
-#endif
-// SE I2C address (7-bit). Default is the NXP SE050 (0x48). (ATECC608 would be 0x60 — but it is P-256
-// only and not recommended; see the constraint above.) Reconcile against the actual schematic at bring-up.
-#ifndef CAGI_SE_I2C_ADDR
-#define CAGI_SE_I2C_ADDR 0x48
-#endif
-// SE bus + enable. The SE sits on its own I2C-B in the protected/tamper zone (VERIFIED_SKU.md §7). On the
-// S3 verified build, buried I2C-B on the UART0 pins (43/44) keeps SE traffic off the shared sensor bus;
-// a board may instead share the sensor I2C-A — set these to CAGI_VERIFIED_I2C_SDA/SCL. ENA is tied high
-// or gated by a GPIO. Placeholders reconciled at schematic bring-up.
-#ifndef CAGI_SE_SDA_GPIO
-#define CAGI_SE_SDA_GPIO 43
-#endif
-#ifndef CAGI_SE_SCL_GPIO
-#define CAGI_SE_SCL_GPIO 44
-#endif
-#ifndef CAGI_SE_ENA_GPIO
-#define CAGI_SE_ENA_GPIO -1   // -1 = ENA tied high (always enabled); set a GPIO to gate the SE
-#endif
-
-// ── Chassis tamper switch ────────────────────────────────────────────────────────────────────────
-// A normally-closed loop across the enclosure seam, read on a GPIO with an internal pull-up: closed
-// (case shut) reads LOW; opening the case breaks the loop and the pin floats HIGH. The first HIGH
-// reading LATCHES an irreversible "case was opened" flag in NVS (tamper-EVIDENT, not tamper-proof).
-#ifndef CAGI_TAMPER_ENABLED
-#define CAGI_TAMPER_ENABLED CAGI_VERIFIED_SKU
-#endif
-// NC loop → GND; INPUT_PULLUP. NOTE: on the ESP32-S3 verified board GPIO12 is a CAMERA DATA line
-// (Y7_GPIO_NUM), so the tamper loop MUST move to a free pin there — GPIO7. The AI-Thinker default keeps
-// 12 (free HS2 pin on that board). See VERIFIED_SKU.md §4.5/§5.
-#ifndef CAGI_TAMPER_GPIO
-  #if defined(CAM_BOARD_ESP32S3)
-    #define CAGI_TAMPER_GPIO 7
-  #else
-    #define CAGI_TAMPER_GPIO 12
-  #endif
-#endif
-
-// ── Corroborating sensors (each independently gated) ────────────────────────────────────────────
-// Solid-state LiDAR / ToF depth (e.g. VL53L5CX zone ToF, or a scanning module over I2C/UART). A real
-// 3D scene has depth variance; a flat display reads as a plane → high flatness → the platform's
-// coherence check drops. The driver contributes a coarse depth frame the manifest declares as "lidar".
-#ifndef CAGI_SENSOR_LIDAR
-#define CAGI_SENSOR_LIDAR 0
-#endif
-// Thermal / long-wave IR array (e.g. MLX90640 32x24). A real scene has a temperature distribution; a
-// display panel is a near-uniform temperature. Contributes a low-res thermal frame declared as "ir".
-#ifndef CAGI_SENSOR_THERMAL
-#define CAGI_SENSOR_THERMAL 0
-#endif
-// EMI / RF near-field probe (a short antenna into an ADC / SDR front-end). A nearby display emits a
-// characteristic refresh-rate EM signature; its presence is a replay tell. Contributes a coarse EMI
-// spectrum declared as "emi".
-#ifndef CAGI_SENSOR_EMI
-#define CAGI_SENSOR_EMI 0
-#endif
-// ── Verified-SKU sensor bus + pin map (S3 reference board; see VERIFIED_SKU.md §4.5) ────────────────
-// The corroborating sensors (LiDAR + thermal) share ONE I2C-A bus at distinct addresses; the SE has its
-// own I2C-B (above). These are the free ESP32-S3 GPIOs on the [env:esp32cam-verified] board — reconcile
-// against the real schematic at bring-up. On non-S3 boards, override to that board's free pins.
-#ifndef CAGI_VERIFIED_I2C_SDA
-#define CAGI_VERIFIED_I2C_SDA 8   // shared sensor I2C data (VL53L5CX 0x29 + MLX90640 0x33)
-#endif
-#ifndef CAGI_VERIFIED_I2C_SCL
-#define CAGI_VERIFIED_I2C_SCL 9   // shared sensor I2C clock (up to 1 MHz for the MLX90640)
-#endif
-// LiDAR (VL53L5CX) control lines: LPn = shutdown/address-select, INT = data-ready (poll fallback if -1).
-#ifndef CAGI_LIDAR_LPN_GPIO
-#define CAGI_LIDAR_LPN_GPIO 5
-#endif
-#ifndef CAGI_LIDAR_INT_GPIO
-#define CAGI_LIDAR_INT_GPIO 6
-#endif
-// EMI front-end ADC inputs (ADC1 only — ADC2 is unusable while Wi-Fi is up). CH0 = envelope-detected
-// near-field E-field probe; the flicker channel = photodiode TIA. Both FFT'd on-device (arduinoFFT).
-#ifndef CAGI_EMI_ADC_PIN
-#define CAGI_EMI_ADC_PIN 1        // ADC1_CH0 — near-field EM refresh/pixel-clock signature
-#endif
-#ifndef CAGI_EMI_FLICKER_ADC_PIN
-#define CAGI_EMI_FLICKER_ADC_PIN 4  // ADC1_CH3 — optical flicker (display PWM/refresh), EM-shield-proof
-#endif
-
-// The stream sidecar channel the signed manifest is announced on (parallel to CAGI_STREAM_CHANNEL).
-#define CAGI_MANIFEST_CHANNEL "manifest"
-// How often (ms) to emit a fresh signed manifest while streaming. The manifest describes a capture
-// WINDOW, not each frame; ~2s keeps the case-intact/boot/modality claims current without flooding the
-// socket. Its `seq` binds it to the frame chain segment it covers.
-#define CAGI_MANIFEST_INTERVAL_MS 2000
+#define CAGI_SEAL_INDEX_CHANNEL "cam-at"
 
 // ── NVS (persistent creds) ──────────────────────────────────────────────────────────────────────
-#define CAGI_NVS_NAMESPACE "cagi"  // a factory-reset erases exactly this namespace
-// Tamper latch key inside the namespace. NOTE: a factory-reset erases the whole `cagi` namespace and so
-// would clear this latch too — on the CAGI_SECURE_ELEMENT variant the AUTHORITATIVE latch lives in the
-// secure element's tamper register (see tamper.cpp), which a factory-reset cannot clear; the NVS copy
-// is only a fast-read mirror. On a non-SE build the NVS latch is best-effort (tamper-evident) only.
-#define CAGI_TAMPER_NVS_KEY "tamper_open"
+#define CAGI_NVS_NAMESPACE "cagi"  // a factory-reset erases exactly this namespace (never `cagi-seal`, the sealing key)
 
 // ── Camera pin map ──────────────────────────────────────────────────────────────────────────────
 // AI-Thinker ESP32-CAM is the default. For an ESP32-S3 board define CAM_BOARD_ESP32S3 (in
