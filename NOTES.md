@@ -96,3 +96,33 @@ a thermal frame, an EMI spectrum) but ship as documented stubs that report `pres
 real part is wired (each names the reference part + the exact driver calls to fill in). That is
 deliberate: the manifest/coherence plumbing is complete and testable end-to-end, and a bring-up just
 fills a `read()` per populated sensor without touching the wiring above it.
+
+## Audio on the ESP32-S3: two I2S ports, no camera conflict
+
+The classic ESP32 camera driver uses I2S0 for pixel DMA, so the INMP441 mic must use I2S1 and nothing
+else can use I2S. The S3 camera driver uses LCD_CAM (the esp32s3 `libesp32-camera.a` references
+`LCD_CAM` and no I2S symbol). So on the DFR1154 the PDM mic takes I2S0 (PDM RX exists only there) and
+the speaker takes I2S1. A speaker build on a classic ESP32 is a compile error.
+
+## The mic task and the frame loop
+
+`Audio::capture()` blocked the loop for a full clip (~1 s), and the camera sent no frame in that
+time. On the S3 a capture task now owns the I2S reads and fills a PSRAM double buffer; the loop only
+takes a finished clip. The buffer states (FREE → FILLING → READY → POSTING) change under one spinlock.
+The classic ESP32 keeps the old blocking path, because that path is the one proven on hardware.
+
+## Speaker: the socket, not HTTP
+
+The speaker speaks the realtime socket's presence protocol (`play_audio`, `present_stop`,
+`action_result`, `config.outputs`), the one host-core speaks, so the platform's grant check and
+record-before-send apply unchanged. Only the loop's task writes to the socket; the speaker task hands
+its results to the loop through a queue. links2004/WebSockets closes the socket on a message over
+15 kB (`WEBSOCKETS_MAX_DATA_SIZE`, not overridable), so large clips must come by `url`.
+
+## MP3 decoder: minimp3, vendored
+
+The platform's voice is MP3. ESP8266Audio and the Helix wrappers are GPL or RPSL; this firmware is
+MIT. minimp3 is CC0, one header, and builds unchanged on arduino-esp32 2.x. It keeps ~16 kB of
+scratch on the stack, so the speaker task has a 40 kB stack. The task decodes the whole clip into
+PSRAM before it reports `ok`, so `durationMs` is the real length and a bad clip fails before any
+sound.

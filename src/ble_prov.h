@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "config.h"
 
 // BLE provisioning service — advertises the CommandAGI camera GATT service so the mobile/desktop app
 // can recognize the device, read INFO, write Wi-Fi creds + account API key (PROVISION), and watch
@@ -16,6 +17,11 @@ bool isUp();
 // Report whether an INMP441 mic was detected, so INFO advertises `mic: true` and the app can show the
 // camera as audio-capable. Call after Audio::begin(); refreshes the INFO characteristic if already up.
 void setMicPresent(bool present);
+#if CAGI_SPEAKER_ENABLED
+// Report whether the speaker started, so INFO advertises `spk: true`. Speaker builds only, so INFO on
+// other builds keeps its exact fields.
+void setSpeakerPresent(bool present);
+#endif
 // Returns true exactly once after the app writes a fresh, valid provisioning payload (creds are
 // already persisted to NVS by then). The main loop polls this to (re)connect.
 bool consumeNewProvisioning();

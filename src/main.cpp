@@ -16,6 +16,7 @@
 #include "status.h"
 #include "camera.h"
 #include "audio.h"
+#include "speaker.h"
 #include "cloud.h"
 #include "cloud_ws.h"
 #include "ble_prov.h"
@@ -165,8 +166,11 @@ void setup() {
   BleProv::begin();
 
   g_cameraOk = Camera::begin();
-  g_audioOk = Audio::begin();  // optional INMP441 — false (and harmless) if absent
+  g_audioOk = Audio::begin();  // optional mic — false (and harmless) if absent
   BleProv::setMicPresent(g_audioOk);
+#if CAGI_SPEAKER_ENABLED
+  BleProv::setSpeakerPresent(Speaker::begin());
+#endif
 
 #if CAGI_VERIFIED_SKU
   // Verified-camera SKU: bring up the tamper latch, corroborating sensors, and the manifest signer.
@@ -272,6 +276,7 @@ void loop() {
   // What can actually run = wired AND desired-on. Either sensor missing/off just drops out.
   const bool camActive = g_cameraOk && g_camDesired;
   const bool micActive = g_audioOk && g_micDesired;
+  Audio::setEnabled(micActive);
 
   // Nothing to stream (no sensors, or the operator turned them all off): stay online; control poll above
   // already runs so a stopped camera can be remotely turned back on.
@@ -312,11 +317,21 @@ void loop() {
     g_nextFrame = millis() + g_frameIntervalMs;
   }
 
-  // Mic clip (capture() blocks ~CAGI_AUDIO_CLIP_MS, which naturally paces audio back-to-back).
+  // Mic clip. On the classic ESP32 capture() blocks ~CAGI_AUDIO_CLIP_MS, which paces audio
+  // back-to-back; on the S3 it returns at once with a clip the capture task finished, or false.
   if (micActive && now >= g_nextAudio) {
     uint8_t* abuf = nullptr;
     size_t alen = 0;
-    if (Audio::capture(&abuf, &alen)) {
+    bool haveClip = Audio::capture(&abuf, &alen);
+#if CAGI_SPEAKER_ENABLED
+    // Duck: a clip recorded while the speaker played (plus a tail) is not posted, so the platform
+    // does not hear the device's own voice.
+    if (haveClip && Speaker::quietForMs() < (uint32_t)CAGI_AUDIO_CLIP_MS + CAGI_SPEAKER_DUCK_TAIL_MS) {
+      Audio::release();
+      haveClip = false;
+    }
+#endif
+    if (haveClip) {
       Cloud::PostResult res;
       Cloud::Control ctl;
       Cloud::postAudio(g_creds, abuf, alen, &res, &ctl);

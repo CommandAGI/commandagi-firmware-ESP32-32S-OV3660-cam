@@ -1,5 +1,6 @@
 #pragma once
 // Compile-time configuration for the CommandAGI ESP32-CAM firmware.
+#include <sdkconfig.h>  // CONFIG_IDF_TARGET_* (the SoC decides the audio paths below)
 
 // Firmware version reported over BLE (INFO.fw) — bump on each release.
 #define CAGI_FW_VERSION "1.2.0"
@@ -83,7 +84,16 @@
 // Gain: INMP441 samples arrive left-justified in a 32-bit slot (24 valid bits). We take the top 16
 // bits for PCM16; this right-shift sets loudness. 11 ≈ a sane default for room-level speech.
 #define CAGI_AUDIO_SHIFT      11
-#if defined(CAM_BOARD_ESP32S3)
+#if defined(CAM_BOARD_DFR_S3_AICAM)
+  // DFR1154: an on-board MSM261DGT003 PDM mic, not an INMP441. Pins from DFRobot's schematic
+  // (DFR1154 Schematic v1.1, nets PDM_CLK = GPIO38, PDM_DATA = GPIO39; mic L/R tied to GND by R3) and
+  // DFRobot/DFR1154_Examples "5.2 Recording & Playback" (setPinsPdmRx(GPIO_NUM_38, GPIO_NUM_39)).
+  // The S3 has PDM RX on I2S0 only. The S3 camera driver uses LCD_CAM, not I2S (libesp32-camera.a for
+  // esp32s3 links LCD_CAM and no I2S symbol), so I2S0 is free on this board.
+  #define CAGI_MIC_PDM        1
+  #define CAGI_PDM_CLK_PIN    38
+  #define CAGI_PDM_DATA_PIN   39
+#elif defined(CAM_BOARD_ESP32S3)
   #define CAGI_I2S_SCK_PIN    41   // BCLK
   #define CAGI_I2S_WS_PIN     42   // LRCL / word-select
   #define CAGI_I2S_SD_PIN     2    // DOUT (mic → ESP)
@@ -92,6 +102,65 @@
   #define CAGI_I2S_SCK_PIN    14   // BCLK
   #define CAGI_I2S_WS_PIN     15   // LRCL / word-select
   #define CAGI_I2S_SD_PIN     13   // DOUT (mic → ESP)
+#endif
+
+#ifndef CAGI_MIC_PDM
+#define CAGI_MIC_PDM 0
+#endif
+// On the ESP32-S3 the mic runs in its own FreeRTOS task into a PSRAM double buffer, so a clip never
+// blocks the frame loop. The classic ESP32 keeps the blocking capture: its camera owns I2S0 and that
+// path is proven on hardware, so we do not change it.
+#if CONFIG_IDF_TARGET_ESP32S3
+#define CAGI_AUDIO_ASYNC 1
+#else
+#define CAGI_AUDIO_ASYNC 0
+#endif
+
+// ── Speaker (I2S amplifier, e.g. the DFR1154's MAX98357A) ───────────────────────────────────────
+// OFF by default, so other builds do not change. A build with -DCAGI_SPEAKER_ENABLED=1 declares a
+// `speaker` output and the `play_audio` / `present_stop` controls on the realtime socket
+// (cloud_ws.cpp; the wire contract is in README.md § Speaker). The platform checks the standing grant
+// and records the command before it sends it; the device reports what it did in `action_result`.
+// That report is the device's claim. It is not proof that a sound came out of the speaker.
+#ifndef CAGI_SPEAKER_ENABLED
+#define CAGI_SPEAKER_ENABLED 0
+#endif
+#if CAGI_SPEAKER_ENABLED
+  #if !CONFIG_IDF_TARGET_ESP32S3
+    #error "CAGI_SPEAKER_ENABLED needs an ESP32-S3: on the classic ESP32 the camera owns I2S0 and the mic I2S1"
+  #endif
+  // Fixed maximum digital gain (0 < gain <= 1.0) applied to every sample before the amplifier. No
+  // command can change it: the wire contract has no level field. 0.5 = -6 dBFS peak.
+  #ifndef CAGI_SPEAKER_MAX_GAIN
+  #define CAGI_SPEAKER_MAX_GAIN 0.5
+  #endif
+  #define CAGI_SPEAKER_MAX_BYTES  (1024u * 1024u)  // a clip larger than 1 MB is refused
+  #define CAGI_SPEAKER_MAX_MS     30000u            // a clip longer than 30 s is refused
+  // The main loop does not post mic clips that overlap playback (plus this tail), so the platform does
+  // not hear the device's own voice.
+  #define CAGI_SPEAKER_DUCK_TAIL_MS 300
+  #if defined(CAM_BOARD_DFR_S3_AICAM)
+    // MAX98357A (U10) nets from DFR1154 Schematic v1.1: BCLK = GPIO45, LRCLK = GPIO46, DIN = GPIO42,
+    // SD_MODE# = GPIO40 (R1 100k pull-up to 3V3), GAIN_SLOT via R6 100k = GPIO41. BCLK/LRCLK/DIN match
+    // DFRobot/DFR1154_Examples (i2s1.setPins(45, 46, 42); "6.10 PlayOnlineMusic" I2S_BCLK 45, I2S_LRC 46,
+    // I2S_DOUT 42). The firmware drives SD_MODE# low (amplifier shut down) except while a clip plays.
+    // It leaves GAIN high-impedance: GAIN_SLOT then floats behind R6, which the MAX98357A datasheet
+    // gives as 9 dB (the state DFRobot's examples use).
+    #define CAGI_SPK_BCLK_PIN   45
+    #define CAGI_SPK_LRCLK_PIN  46
+    #define CAGI_SPK_DIN_PIN    42
+    #define CAGI_SPK_SD_PIN     40
+    #define CAGI_SPK_GAIN_PIN   41
+  #endif
+  #if !defined(CAGI_SPK_BCLK_PIN) || !defined(CAGI_SPK_LRCLK_PIN) || !defined(CAGI_SPK_DIN_PIN)
+    #error "CAGI_SPEAKER_ENABLED: define CAGI_SPK_BCLK_PIN, CAGI_SPK_LRCLK_PIN and CAGI_SPK_DIN_PIN for this board"
+  #endif
+  #ifndef CAGI_SPK_SD_PIN
+  #define CAGI_SPK_SD_PIN -1
+  #endif
+  #ifndef CAGI_SPK_GAIN_PIN
+  #define CAGI_SPK_GAIN_PIN -1
+  #endif
 #endif
 
 // ── Verified-camera SKU (multi-modal + tamper-evident) ──────────────────────────────────────────

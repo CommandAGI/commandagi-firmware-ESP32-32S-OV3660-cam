@@ -88,7 +88,7 @@ contract is shared with the apps in ``packages/domain/core/src/esp32cam.ts`` (pl
 
 | Characteristic | UUID suffix | Props         | Payload                                                                      |
 | -------------- | ----------- | ------------- | ---------------------------------------------------------------------------- |
-| INFO           | `…0002`     | read          | `{ kind, model, fw, hwid, name, provisioned, mic, secure, salt? }`           |
+| INFO           | `…0002`     | read          | `{ kind, model, fw, hwid, name, provisioned, mic, spk?, secure, salt? }`     |
 | STATUS         | `…0003`     | read + notify | `{ state, ip?, sessionId?, deviceId?, error? }`                              |
 | PROVISION      | `…0004`     | write         | PIN-sealed `{ ssid, psk, apiBaseUrl, apiKey, deviceName? }` (see _Security_) |
 | COMMAND        | `…0005`     | write         | `identify` \| `reboot` \| `factory-reset`                                    |
@@ -115,6 +115,98 @@ when one is detected at boot.
 GPIO13/14/15 are the unused HS2 SD-card pins; override them (and the ESP32-S3 defaults) in
 [`src/config.h`](src/config.h). Audio is 16 kHz mono PCM16, posted as 1 s WAV clips to
 `channel=mic&kind=audio`. Set `-DCAGI_AUDIO_ENABLED=0` to compile the mic out entirely.
+
+### The DFR1154's on-board PDM mic
+
+The DFRobot DFR1154 (`-DCAM_BOARD_DFR_S3_AICAM`) has an MSM261DGT003 PDM mic on the board. With
+`-DCAGI_AUDIO_ENABLED=1` the firmware reads it in PDM RX mode on I2S0: clock on GPIO38, data on GPIO39
+(DFR1154 Schematic v1.1, nets `PDM_CLK` / `PDM_DATA`; DFRobot's `DFR1154_Examples` 5.2 uses the same
+pins). The S3 has PDM RX on I2S0 only. The S3 camera driver uses the LCD_CAM peripheral, not I2S, so
+the mic and the camera do not share a peripheral. The mic's L/R pin is tied to GND; the firmware
+probes the left slot first and then the right slot, and logs which one carries data.
+
+### Capture without blocking video (ESP32-S3)
+
+On an ESP32-S3 build a capture task records continuously into two 1 s WAV buffers in PSRAM. The
+main loop posts a finished clip when one is ready and never waits for the mic. The task is pinned to
+core 1 with the loop; the camera driver's task and Wi-Fi run on core 0. If the loop still posts the
+previous clip when the next one is finished, the task drops the finished clip and logs it. The HTTPS
+POST of a clip still runs in the loop and holds it for one round trip per second.
+
+The classic ESP32 keeps the blocking capture (one clip per call, ~1 s). Its camera owns I2S0, and that
+path is proven on hardware, so it does not change.
+
+When the operator turns the mic off, the S3 capture task stops the I2S clock and drops a clip that
+was not posted.
+
+## Speaker (`-DCAGI_SPEAKER_ENABLED=1`, ESP32-S3 only)
+
+A speaker build declares a `speaker` output on the realtime socket and plays audio clips that the
+platform sends. Default is off (`0`), so other builds do not change. The DFR1154 pins come from its
+schematic (Schematic v1.1, MAX98357A U10): BCLK GPIO45, LRCLK GPIO46, DIN GPIO42, SD_MODE# GPIO40,
+GAIN_SLOT GPIO41 through 100 kΩ. The speaker uses I2S1 (the mic has I2S0).
+
+The platform checks the standing grant and records the command before it sends it. The device does
+not decide authority. INFO advertises `spk: true` when the speaker driver started.
+
+### Wire contract (realtime socket `wss://…/rt/run/<sessionId>?device=…&role=agent&runtime=1`)
+
+The same protocol as `packages/runtime/host-core/src/client.ts`.
+
+1. After `{"type":"channels",…}` the device sends:
+
+   ```json
+   {"type":"outputs","outputs":[{"outputId":"speaker","kind":"speaker","label":"Speaker","primary":true}]}
+   {"type":"controls","controls":[{"channelId":"ctrl","kind":"ctrl","label":"Presence",
+     "actions":["play_audio","present_stop"],"payloadSchema":{"play_audio":{…},"present_stop":{…}}}]}
+   ```
+
+   The schemas are `PRESENCE_PAYLOAD_SCHEMAS` from `client.ts`. The device does not declare `say`: it
+   has no text-to-speech. The platform makes a clip from `say` and sends `play_audio`.
+
+2. The platform sends
+   `{"type":"control","channelId":"ctrl","action":"play_audio","payload":{"url"?,"base64"?,"mime"?,"format"?,"outputId"?,"loop"?,"interrupt"?},"requestId"?}`.
+   - `url`: `https://` only. The device sends its API key as `Authorization: Bearer` only when the URL's
+     host is the API host it was provisioned with; the URL's own `token=` query does the rest.
+   - `base64`: decoded on the device. **The socket library closes the socket (code 1009) on any
+     message over 15 kB**, so a base64 clip must keep the whole message under 15 kB. Send a `url` for
+     a larger clip.
+   - Formats: MP3 (the platform's synthesized voice) and WAV PCM16, mono or stereo (mixed to mono),
+     8–48 kHz. `format`, then `mime`, then the response's `Content-Type` (when it is `audio/*`) name the
+     format; without one the device looks at the bytes. Anything else fails.
+   - Limits: the device refuses a clip over 1 MB or over 30 s, and `loop: true`.
+   - `interrupt` (default true) stops the current clip first. `interrupt: false` while a clip loads or
+     plays fails with `busy: one clip at a time`.
+   - `outputId` other than `speaker` fails.
+
+3. The device replies once per `requestId`:
+   - `{"type":"action_result","requestId":…,"action":"play_audio","result":{"ok":true,"durationMs":N}}`
+     when playback starts. This is the device's report. It is not proof that sound came out.
+   - `{"type":"action_result",…,"result":{"ok":false,"error":"…"}}` when it refuses or fails: a bad
+     format, a limit, a failed fetch, `stopped`, `interrupted by a newer clip`, or
+     `speaker output disabled by the operator`.
+   - A result made while the socket is down is lost.
+
+4. `present_stop` stops the clip that plays and drops one that waits; it replies `{ok:true}`.
+
+5. `{"type":"config","outputs":{"speaker":false}}` disables the output: the device stops playback and
+   refuses `play_audio` until a `config` with `outputs` that does not set `speaker: false`.
+
+6. One clip at a time. The device never retries a clip; the platform or an agent decides to send it
+   again, as a new command.
+
+### Safety and level
+
+- `CAGI_SPEAKER_MAX_GAIN` (default 0.5, that is −6 dBFS peak) multiplies every sample. It is a
+  compile-time constant; no message can change it.
+- The firmware holds the amplifier in shutdown (SD_MODE# low) except while a clip plays, and leaves
+  GAIN_SLOT floating behind its 100 kΩ resistor (9 dB in the MAX98357A datasheet, the state DFRobot's
+  examples use).
+
+### The mic while the speaker plays
+
+The mic keeps recording. The main loop does not post a clip recorded while the speaker played (plus
+300 ms), so the platform does not hear the device's own voice. This is a duck, not echo cancellation.
 
 ## Remote sensor control
 
@@ -160,7 +252,11 @@ src/
   ble_prov.*        NimBLE provisioning GATT service
   cloud.*           Wi-Fi join + self-registration + frame/audio POST + control poll
   camera.*          OV2640 init + JPEG capture
-  audio.*           INMP441 I2S mic init + WAV clip capture (optional)
+  audio.*           mic (INMP441 I2S or PDM) init + WAV clip capture (optional; a capture task on S3)
+  speaker.*         speaker: I2S TX, fetch, decode, play, results (optional, S3 only)
+  clip.*            speaker clip decoder: WAV PCM16 / MP3 → mono PCM16 (plain C++, host-tested)
+  third_party/      minimp3.h (CC0, github.com/lieff/minimp3 at ea99364f)
+test/host/          clip_test.cpp: the clip decoder against good and bad clips, built with g++
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
 ```
@@ -173,3 +269,17 @@ src/
 
 All PlatformIO environments declared by this repository compiled successfully using PlatformIO
 6.2.0. This verifies compilation, not physical wiring, sensor operation or live cloud connectivity.
+
+## Build verification (2026-10-03, branch `cam-002-audio`)
+
+PlatformIO 6.2.0 compiled `esp32cam`, `esp32cam-s3`, `esp32cam-verified`, both with
+`-DCAGI_AUDIO_ENABLED=1` for the INMP441 path, and `hardware/CommandAGI-Cam-002/firmware`
+(`esp32cam-s3` + mic + speaker). `test/host/clip_test.cpp` passed with g++ against built WAVs and
+minimp3's layer III vectors:
+
+```sh
+g++ -std=c++17 -O1 -Wall -Isrc test/host/clip_test.cpp src/clip.cpp -o /tmp/clip_test && /tmp/clip_test [file.mp3 …]
+```
+
+This is compilation and a host test only. No board ran this firmware: the PDM mic, the capture task,
+the speaker, the WebSocket messages and the video rate with the mic on are not verified on hardware.

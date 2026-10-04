@@ -14,6 +14,9 @@ bool g_up = false;  // whether the NimBLE stack is currently initialized/adverti
 uint8_t g_salt[16];   // per-boot provisioning salt (published in INFO so the app derives the PIN key)
 String g_saltHex;
 bool g_micPresent = false;  // set by setMicPresent() once the mic is probed
+#if CAGI_SPEAKER_ENABLED
+bool g_spkPresent = false;  // set by setSpeakerPresent() once the speaker is up
+#endif
 
 // Derive the device id from the eFuse MAC (NOT NimBLEDevice::getAddress(), which would pend on the
 // BLE host's mutex *before* NimBLEDevice::init() has created it — a null-handle assert + boot loop).
@@ -38,7 +41,10 @@ String infoJson() {
   d["hwid"] = fullMac();
   d["name"] = String(CAGI_ADV_NAME_PREFIX) + macSuffix();
   d["provisioned"] = Store::hasCreds();
-  d["mic"] = g_micPresent;  // INMP441 detected → device is audio-capable
+  d["mic"] = g_micPresent;  // mic detected → device is audio-capable
+#if CAGI_SPEAKER_ENABLED
+  d["spk"] = g_spkPresent;  // speaker built in and its I2S driver started
+#endif
   d["secure"] = (bool)CAGI_PROV_SECURE;
 #if CAGI_PROV_SECURE
   d["salt"] = g_saltHex;  // the app derives the PIN key from this + the PIN
@@ -147,6 +153,13 @@ void setMicPresent(bool present) {
   g_micPresent = present;
   if (g_info) g_info->setValue(infoJson());
 }
+
+#if CAGI_SPEAKER_ENABLED
+void setSpeakerPresent(bool present) {
+  g_spkPresent = present;
+  if (g_info) g_info->setValue(infoJson());
+}
+#endif
 
 void begin() {
   if (g_up) return;  // idempotent — already advertising
