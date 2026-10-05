@@ -46,10 +46,10 @@ The provisioning PIN seals the BLE payload (Wi-Fi password + account key). The r
 which mints one per board, compiles it in, and prints a label that matches the MAC suffix the app
 shows.
 
-**Prefer the monorepo-level general flasher.** The camera-only `tools/batch-flash.mjs`
-(`make firmware-batch`) still works, but the canonical way to flash/label any product (camera, arm,
-future) is now the repo-root `scripts/flash-device.mjs` / `make flash-device PRODUCT=camera` — same
-PIN-mint + suffix-read + `labels.csv` flow, one tool across products (see the repo `scripts/README.md`).
+**In the CommandAGI repository**, flash and label any product (camera, arm, robots) with its
+`scripts/hardware/flash-embodiment.mjs` (`make flash-device PRODUCT=<product>`): the same PIN-mint,
+suffix-read and `labels.csv` flow. `tools/batch-flash.mjs` is this repository's own flasher for a
+standalone clone.
 
 ## Always re-flashable
 
