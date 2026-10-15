@@ -460,10 +460,49 @@ python3 tools/seal-provision.py pin    /dev/ttyACM0 482913
   `frame_request` from the deployed platform.
 - The production lock has not run on a board: no eFuse was burned. The builds compile and are signed with a
   throwaway key pair, and the factory script runs against a fake board only.
-- No over-the-air update: a locked unit cannot be updated until the firmware has one (it must verify the
-  new image, which `CONFIG_SECURE_SIGNED_ON_UPDATE` does, and revoke a leaked key's digest slot).
+- A locked unit takes no over-the-air update yet: the update (§ Firmware updates) checks the file's SHA-256 the
+  host names, not a signature. A locked unit must verify the new image (`CONFIG_SECURE_SIGNED_ON_UPDATE`) and
+  revoke a leaked key's digest slot.
 - No unit has streamed to the deployed recorder. The host test runs this sealing code through a refused
   second and a resume, and CommandAGI's recorder check (`checkSealGroup`) accepts every group it sent.
+
+## Firmware updates
+
+A host updates the camera over the realtime socket it already dials (CommandAGI's
+`packages/runtime/local-host/drivers/host-wire-firmware.mjs`, `docs/firmware-updates.md`). Every build has it.
+
+| direction | message | what happens |
+|---|---|---|
+| host → camera | `{ type: "firmware_report" }` | the camera answers `firmware_state` (and first says what became of an update at boot) |
+| host → camera | `{ type: "firmware_update", sha256, size, version, url }` | the camera fetches `url`, writes the other OTA slot, and boots it |
+| host → camera | `{ type: "firmware_rollback" }` | the camera boots the other slot |
+| camera → host | `{ type: "firmware_state", status, running: { sha256?, version, slot, partitionSha256 }, previous?, values: { bootCount } }` | `status`: running or updating |
+| camera → host | `{ type: "firmware_reply", text }` | a refusal, a slot written, a rollback at boot, a confirmation |
+
+- **The image.** `url` is a path (`/v1/firmware/<session>/<device>/<sha256>`). The camera fetches it from the
+  origin of its own `apiBaseUrl` with its key (`Authorization: Bearer`), never from another host
+  (`src/ota_wire.h` `checkUpdate`, `joinUrl`). It hashes the bytes with mbedtls SHA-256 as they arrive and writes
+  them with `esp_ota_write`. It refuses, aborts the slot and says why when the size or the digest differs, when the
+  bytes stop for 20 s, or when `esp_ota_end` finds no app image. Only then does it set the boot slot and restart.
+- **What it reports.** `running.sha256` is the SHA-256 of the image FILE, which the camera computed while it wrote
+  the slot and kept in NVS (namespace `cagi_ota`: `f_<slot>`, with the slot's partition digest `p_<slot>` and the
+  version `v_<slot>`). It is reported only while the slot's partition digest (`esp_partition_get_sha256`) is still
+  the one kept: a slot flashed again over USB reports no `sha256`. `partitionSha256` is that partition digest, which
+  is not the file's digest. `version` is the running build's `CAGI_FW_VERSION`.
+- **Rollback.** arduino-esp32 2.0.17 and the cellular envs' `sdkconfig.defaults.*` have
+  `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. The app defines `verifyRollbackLater()`, so a new image stays
+  pending-verify until its socket reaches the host; then it marks itself valid (`Ota::onConnected`). An image that
+  does not reach the host in `CAGI_OTA_CONFIRM_MS` (5 min) marks itself invalid and reboots; one that resets first is
+  taken back by the bootloader. After that boot the camera says which image did not confirm. `firmware_rollback`
+  boots the other slot when it holds an image that ran (or, during the confirm time, marks the new one invalid).
+- **Unverified.** No camera has taken an update. The host test (`test/host/ota_wire_test.cpp`) covers the pure
+  parts; CommandAGI's `tests/workbench/host-wire-firmware.test.mjs` runs the host against a simulated camera that
+  speaks this wire. The download into the slot, the boot, the bootloader's rollback, the NVS digests and the confirm
+  timeout must run on a camera on the bench (CommandAGI's `docs/commissioning.md`, family `firmware-ota`).
+
+```sh
+g++ -std=c++17 -O1 -Wall -Werror -Isrc test/host/ota_wire_test.cpp -o /tmp/ota_wire_test && /tmp/ota_wire_test
+```
 
 ## Remote sensor control
 
@@ -522,6 +561,8 @@ src/
   chip_lock_status.h  the seal's status object from the lock's facts (plain C++, host-tested)
   ir.*              IR night mode: GPIO47, the LTR-308, the night tuning (optional, DFR1154)
   ir_policy.h       the IR decision with hysteresis (plain C++, host-tested)
+  ota.*             firmware updates on the realtime socket: fetch, hash, write the other slot, confirm, roll back
+  ota_wire.h        the update's checks and the slot digests' bookkeeping (plain C++, host-tested)
   CMakeLists.txt    the ESP-IDF main component (cellular envs only)
   idf_component.yml esp32-camera from the ESP-IDF registry (cellular envs only)
 CMakeLists.txt      the ESP-IDF project file (cellular envs only)
@@ -532,6 +573,7 @@ test/host/          clip_test.cpp: the clip decoder against good and bad clips, 
                     seal_test.cpp: the sealed streams, verified by CommandAGI's JavaScript verifier;
                     ir_policy_test.cpp: the IR decision against a light level that crosses the thresholds
                     base_url_test.cpp: the realtime socket's scheme, host and port from apiBaseUrl
+                    ota_wire_test.cpp: an update's checks, the image's url, the size and digest verdict, the slot digests
 tools/              batch-flash.mjs, read-suffix.py (labels); seal-provision.py (the key's certificate)
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
@@ -629,3 +671,16 @@ g++ -std=c++17 -O1 -Wall -Werror -Isrc test/host/base_url_test.cpp -o /tmp/base_
 ```
 
 No board ran it.
+
+## Build verification (2026-10-15, branch `test-ota`: firmware updates on the realtime socket)
+
+PlatformIO 6.2.0 compiled `esp32cam` 1,346,533 bytes of flash, `esp32cam-s3-seals` 1,348,401 and
+`esp32cam-s3-cellular` 1,257,661 (the ESP-IDF build with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` from its
+`sdkconfig.defaults`). The host test passed:
+
+```sh
+g++ -std=c++17 -O1 -Wall -Werror -Isrc test/host/ota_wire_test.cpp -o /tmp/ota_wire_test && /tmp/ota_wire_test
+```
+
+CommandAGI's `tests/workbench/host-wire-firmware.test.mjs` passed against a simulated camera that speaks the wire. No
+board ran it: no camera has fetched an image, written a slot, booted it or gone back.

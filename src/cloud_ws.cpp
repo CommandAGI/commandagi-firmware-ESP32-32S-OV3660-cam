@@ -6,6 +6,7 @@
 #include "status.h"
 #include "speaker.h"
 #include "clip.h"
+#include "ota.h"
 #if CAGI_DEVICE_SEALS
 #include <esp_heap_caps.h>
 #include "mbedtls/base64.h"
@@ -191,6 +192,7 @@ void onEvent(WStype_t type, uint8_t* payload, size_t len) {
       g_connected = true;
       Serial.println("[ws] connected — announcing camera channel");
       announceChannel();
+      Ota::onConnected();  // a new image that waited to reach the host confirms itself
 #if CAGI_SPEAKER_ENABLED
       if (Speaker::available()) {
         ws.sendTXT(kOutputs);
@@ -199,8 +201,8 @@ void onEvent(WStype_t type, uint8_t* payload, size_t len) {
 #endif
       ::Status::set("streaming");
       break;
-#if CAGI_SPEAKER_ENABLED || CAGI_DEVICE_SEALS
     case WStype_TEXT:
+      if (Ota::onMessage(payload, len)) break;  // firmware_report / _update / _rollback (src/ota.cpp)
 #if CAGI_DEVICE_SEALS
       if (Seal::onMessage(payload, len)) break;
 #endif
@@ -208,7 +210,6 @@ void onEvent(WStype_t type, uint8_t* payload, size_t len) {
       onText(payload, len);
 #endif
       break;
-#endif
     case WStype_DISCONNECTED:
       if (g_connected) Serial.println("[ws] disconnected");
       g_connected = false;
@@ -217,7 +218,7 @@ void onEvent(WStype_t type, uint8_t* payload, size_t len) {
       g_connected = false;
       break;
     default:
-      break;  // inbound TEXT/BIN/PONG — control still arrives via the HTTP poll in cloud.cpp
+      break;  // inbound BIN/PONG — control still arrives via the HTTP poll in cloud.cpp
   }
 }
 }  // namespace

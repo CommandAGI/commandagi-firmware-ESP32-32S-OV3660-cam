@@ -24,6 +24,7 @@
 #include "cloud_ws.h"
 #include "ble_prov.h"
 #include "seal_runtime.h"
+#include "ota.h"
 #if CAGI_IR_ENABLED
 #include "ir.h"
 #endif
@@ -228,6 +229,7 @@ void setup() {
 
   Store::begin();
   Status::set("idle");
+  Ota::begin();  // what became of an update written before this boot (README § Firmware updates)
 
 #ifdef CAGI_CAMTEST
   // Hardware diagnostic build: probe the camera in isolation so we can tell a dead sensor from a
@@ -300,6 +302,7 @@ void loop() {
   delay(1000);  // diagnostic build: the probe ran once in setup(); nothing else to do
   return;
 #endif
+  Ota::watch();  // with or without a link: a new image that never reaches the host goes back
 #if CAGI_IR_ENABLED
   {
     // Before any early return: IR follows the camera on every pass, provisioned or not.
@@ -372,6 +375,7 @@ void loop() {
   if (!CloudWs::connected() && g_wsStartedAt == 0) g_wsStartedAt = now;
   CloudWs::begin(g_creds);
   CloudWs::loop();
+  Ota::loop(g_creds);  // a report, or an update or rollback the host asked for (blocks; may restart)
   if (CloudWs::connected()) g_wsStartedAt = 0;  // healthy — reset the connect watchdog
   // The socket has been started but won't connect (expired token / deleted session / bad route): drop
   // the cached registration so the next pass re-registers and mints a fresh token + socket.
