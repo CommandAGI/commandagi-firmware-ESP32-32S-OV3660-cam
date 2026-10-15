@@ -191,7 +191,8 @@
   #ifndef CAGI_MODEM_BAUD_FAST
   #define CAGI_MODEM_BAUD_FAST  921600  // AT+IPR after sync; the driver falls back to 115200 if it fails
   #endif
-  // Pins from the product READMEs (hardware/CommandAGI-Cam-00x/README.md § modem pin map). PWRKEY and
+  // Pins from the product READMEs (hardware/CommandAGI-Cam-00x/README.md § modem pin map); Cam-001's are checked
+  // against its schematic (§ the product's schematic, at the end of this file). PWRKEY and
   // RESET drive a transistor that pulls the modem pin low: HIGH = pressed / held. -1 = not wired.
   #if defined(CAM_BOARD_DFR_S3_AICAM)
     // Cam-002 carrier: Gravity connector (GPIO43/44) + the microSD contacts (GPIO11/12/13).
@@ -359,5 +360,26 @@
     #define CAGI_XCLK_HZ 20000000
   #else
     #define CAGI_XCLK_HZ 16000000
+  #endif
+#endif
+
+// ── The product's schematic ─────────────────────────────────────────────────────────────────────
+// A product build names the pin header its schematic makes (-DCAGI_PINS_HEADER, written by CommandAGI's
+// `commandagi pins` at each build; never edited). Each line binds a pin of this file to the schematic's net: the
+// build stops when the pin is not the schematic's GPIO of that net. `commandagi check <platformio.ini>` reads the
+// same lines with no build. Change a pin in the schematic and here together.
+#ifdef CAGI_PINS_HEADER
+  #include CAGI_PINS_HEADER
+  #if defined(CAM_BOARD_AITHINKER)
+    // CommandAGI-Cam-001: the ESP32-CAM (U1) in its base board (ee/CommandAGI-Cam-001.sch.tsx).
+    CAGI_PIN_IS(XCLK_GPIO_NUM, IO0_XCLK_BOOT);
+    CAGI_PIN_IS(LED_GPIO_NUM, IO4_FLASH);
+    #if CAGI_CELLULAR_ENABLED
+      CAGI_PIN_IS(CAGI_MODEM_TX_PIN, MODEM_RXD);
+      CAGI_PIN_IS(CAGI_MODEM_RX_PIN, MODEM_TXD);
+      CAGI_PIN_IS(CAGI_MODEM_PWRKEY_PIN, MODEM_PWRKEY);
+      CAGI_PIN_IS(CAGI_MODEM_STATUS_PIN, MODEM_STATUS);
+      CAGI_PIN_IS(CAGI_MODEM_RAIL_OFF_PIN, MODEM_RAIL_OFF);
+    #endif
   #endif
 #endif
