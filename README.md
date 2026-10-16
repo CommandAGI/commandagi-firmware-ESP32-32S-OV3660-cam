@@ -24,7 +24,7 @@ change networks, no cloud account baked into the binary.
 power on ──► advertises over BLE ──► app finds it ("My cameras → Pair")
         ──► app sends Wi-Fi creds + a per-device account key over BLE
         ──► camera joins Wi-Fi, registers a machine session under your account
-        ──► streams JPEG frames ──► shows up live in the dashboard
+        ──► streams sealed JPEG frames ──► shows up live in the dashboard
 ```
 
 It remembers everything in flash (NVS), so after a power cycle it reconnects and resumes streaming on
@@ -36,8 +36,8 @@ its own. See [the hardware notes](hardware/README.md) for the board and security
 - A USB-UART adapter (FTDI/CP2102) for the first flash, or an ESP32-CAM-MB programmer board.
 - Other boards (e.g. ESP32-S3 cams) work by editing the pin map in [`src/config.h`](src/config.h) and
   adding `-DCAM_BOARD_ESP32S3` to `build_flags`.
-- A **sealing** build (`-DCAGI_DEVICE_SEALS=1`, env `esp32cam-s3-seals`, and CommandAGI-Cam-002) signs
-  its own frames with a key made on the device (§ Sealed stream).
+- Every build signs its own frames with a key made on the device (§ Sealed stream). It is the
+  camera's only frame path.
 
 ## Flashing
 
@@ -316,14 +316,14 @@ The same protocol as `packages/runtime/host-core/src/client.ts`.
 The mic keeps recording. The main loop does not post a clip recorded while the speaker played (plus
 300 ms), so the platform does not hear the device's own voice. This is a duck, not echo cancellation.
 
-## Sealed stream (`-DCAGI_DEVICE_SEALS=1`)
+## Sealed stream
 
 The camera seals its own stream, so a verifier can check which key recorded the frames and that nobody
 changed, dropped, added or moved one afterwards. The format is CommandAGI's (`docs/integrity.md` in the
 CommandAGI repository, § sealed streams). The sealer is `src/seal/seal.{h,c}`, a verbatim copy of
 CommandAGI's `deployments/clients/seal-c` (that repository's `tests/workbench/seal-c.test.mjs` checks
-the two are the same). Default is off (`0`). `esp32cam-s3-seals` and both CommandAGI-Cam-002 envs turn
-it on; any env builds with it.
+the two are the same). Every env seals: the camera has no unsealed frame path (CommandAGI-Cam-001 and
+CommandAGI-Cam-002 run the same code).
 
 **The key.** On its first boot the device makes an Ed25519 key (32 random bytes from
 `esp_fill_random()` while the radio is on; libsodium signs) and keeps it in NVS, namespace `cagi-seal`.
@@ -376,7 +376,7 @@ when it was sent:
 {"type":"data","channelId":"cam-at","kind":"events","format":"jsonl","url":"data:text/plain;base64,<cam-at's lines, each ending in \n>"}
 ```
 
-A sealing build does not send bare binary frames (the platform does not record those). Each stream's
+The camera sends no bare binary frames and posts no frames over HTTP. Each stream's
 lines wait in a 32 kB outbox until the socket takes them, once a second with the seals; while the index
 outbox is full, no frame is sent. `cam-at`'s lines go out only after `cam`'s seal over their frames.
 
@@ -506,7 +506,7 @@ g++ -std=c++17 -O1 -Wall -Werror -Isrc test/host/ota_wire_test.cpp -o /tmp/ota_w
 
 ## Remote sensor control
 
-While streaming, each frame/audio POST response carries the operator's desired sensor state
+While streaming, each audio POST response carries the operator's desired sensor state
 (`{ sensors: { cam, mic, ir? } }`), so toggling a camera's cam/mic off in the dashboard stops that stream
 within one interval. When every sensor is off the device goes `paused` and polls
 `GET /v1/streams/:sessionId/:deviceId/control` every few seconds, so it can be turned back on
@@ -548,7 +548,7 @@ src/
                     the ESP-IDF build of the cellular envs also compiles Arduino's cores/esp32/main.cpp)
   config.h          version, BLE UUIDs (mirror core), camera pin map, NVS keys
   ble_prov.*        NimBLE provisioning GATT service
-  cloud.*           Wi-Fi join + self-registration + frame/audio POST + control poll
+  cloud.*           Wi-Fi join + self-registration + audio POST + control poll
   camera.*          OV2640 init + JPEG capture
   audio.*           mic (INMP441 I2S or PDM) init + WAV clip capture (optional; a capture task on S3)
   speaker.*         speaker: I2S TX, fetch, decode, play, results (optional, S3 only)
@@ -684,3 +684,13 @@ g++ -std=c++17 -O1 -Wall -Werror -Isrc test/host/ota_wire_test.cpp -o /tmp/ota_w
 
 CommandAGI's `tests/workbench/host-wire-firmware.test.mjs` passed against a simulated camera that speaks the wire. No
 board ran it: no camera has fetched an image, written a slot, booted it or gone back.
+
+## Build verification (2026-10-16, `main`: every build seals; the unsealed frame paths are gone)
+
+The `CAGI_DEVICE_SEALS` switch is removed: every env seals its frames, and `CloudWs::sendFrame` (bare binary frames)
+and `Cloud::postFrame` (HTTP frames) are gone. The `esp32cam-s3-seals` env is gone with it (`esp32cam-s3` is the
+same build now). PlatformIO 6.2.0 compiled CommandAGI's `hardware/CommandAGI-Cam-001/firmware` `commandagi-cam-001`
+(1,548,965 bytes of flash) and `hardware/CommandAGI-Cam-002/firmware` `commandagi-cam-002` and
+`commandagi-cam-002-battery` (1,447,897 and 1,458,797), and here `esp32cam` (1,491,973) and `esp32cam-s3`
+(1,348,249). CommandAGI's `commandagi check` passes on both cameras' definitions. No
+board ran it: no Cam-001 has made a key, sealed a frame or reached a recorder.

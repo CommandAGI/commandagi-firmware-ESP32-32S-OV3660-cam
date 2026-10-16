@@ -3,12 +3,11 @@
 #include "config.h"
 #include "store.h"
 
-// The device seals its own camera stream (build flag CAGI_DEVICE_SEALS; README § Sealed stream). The
+// The device seals its own camera stream (every build; README § Sealed stream). The
 // key is an Ed25519 key the device makes on its first boot and keeps in NVS (namespace `cagi-seal`,
 // which a factory-reset does not erase). The sealed stream itself is src/device_seal.cpp.
 namespace Seal {
 
-#if CAGI_DEVICE_SEALS
 // Load the key, or make it on the first boot; take the next block of seqs and counters. Call after
 // BleProv::begin(): the radio is on, so esp_fill_random() gives true random numbers.
 void begin();
@@ -31,6 +30,5 @@ String spki();
 // before any later frame goes out. A `frame_request` waits for serveFrameRequest (a camera is not read
 // inside the socket's callback). True when the message was one of these.
 bool onMessage(const uint8_t* payload, size_t len);
-#endif
 
 }  // namespace Seal

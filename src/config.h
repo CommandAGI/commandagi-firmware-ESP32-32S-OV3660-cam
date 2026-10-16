@@ -46,8 +46,8 @@
 #define CAGI_BLE_PASSKEY 123456
 
 // ── Streaming ───────────────────────────────────────────────────────────────────────────────────
-// Target ms between frames. Frames now stream over a persistent WebSocket (cloud_ws), so the cost per
-// frame is just the capture + a binary send — no per-frame HTTP. Default 33ms (~30fps); the real rate
+// Target ms between frames. Frames stream over a persistent WebSocket (cloud_ws), so the cost per
+// frame is the capture, the seal's hash and one send — no per-frame HTTP. Default 33ms (~30fps); the real rate
 // is bounded by capture + Wi-Fi. The server can push a slower cadence (battery/bandwidth); the floor is
 // CAGI_FRAME_INTERVAL_MIN_MS.
 #define CAGI_FRAME_INTERVAL_MS     33
@@ -61,7 +61,7 @@
 #define CAGI_BLE_REVIVE_MS     45000
 
 // How often (ms) to ask the API for the desired sensor state (cam/mic on/off) when the device is
-// NOT actively streaming. While streaming, the desired state piggybacks on each frame/audio POST
+// NOT actively streaming. While streaming, the desired state piggybacks on each audio POST
 // response (zero extra requests), so this only paces the idle "is a sensor turned back on?" poll.
 #define CAGI_CONTROL_POLL_MS   3000
 
@@ -275,14 +275,11 @@
 #define CAGI_RUNTIME_STATUS_MS 60000
 
 // ── Sealed stream (the device seals its own frames) ────────────────────────────────────────────
-// OFF by default. A build with -DCAGI_DEVICE_SEALS=1 makes an Ed25519 key on its first boot (NVS
-// namespace `cagi-seal`), stamps each frame with its capture time, indexes it in the `cam-at` channel
-// and seals each stream once a second with deployments/clients/seal-c (src/seal/). Both
-// channels are declared `seals: "device"`, so the recorder keeps them byte for byte. Frames then go as
-// addressed `frame` messages, not bare binary. README § Sealed stream; docs/integrity.md in CommandAGI.
-#ifndef CAGI_DEVICE_SEALS
-#define CAGI_DEVICE_SEALS 0
-#endif
+// Every build makes an Ed25519 key on its first boot (NVS namespace `cagi-seal`), stamps each frame
+// with its capture time, indexes it in the `cam-at` channel and seals each stream once a second with
+// deployments/clients/seal-c (src/seal/). Both channels are declared `seals: "device"`, so the
+// recorder keeps them byte for byte. Frames go as addressed `frame` messages; this is the camera's only
+// frame path. README § Sealed stream; docs/integrity.md in CommandAGI.
 #define CAGI_SEAL_INDEX_CHANNEL "cam-at"
 
 // ── NVS (persistent creds) ──────────────────────────────────────────────────────────────────────

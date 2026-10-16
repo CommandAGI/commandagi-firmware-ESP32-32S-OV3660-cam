@@ -7,11 +7,9 @@
 #include "speaker.h"
 #include "clip.h"
 #include "ota.h"
-#if CAGI_DEVICE_SEALS
 #include <esp_heap_caps.h>
 #include "mbedtls/base64.h"
 #include "seal_runtime.h"
-#endif
 
 namespace {
 WebSocketsClient ws;
@@ -34,7 +32,6 @@ void announceChannel() {
   c0["channelId"] = CAGI_STREAM_CHANNEL;  // "cam"
   c0["kind"] = "camera";
   c0["label"] = g_channelName;
-#if CAGI_DEVICE_SEALS
   JsonObject ch = c0["channel"].to<JsonObject>();
   ch["id"] = CAGI_STREAM_CHANNEL;
   ch["dir"] = "out";
@@ -51,13 +48,11 @@ void announceChannel() {
   ix["medium"] = "records";
   ix["format"] = "byte-ranges";
   ix["seals"] = "device";
-#endif
   String out;
   serializeJson(d, out);
   ws.sendTXT(out);
 }
 
-#if CAGI_DEVICE_SEALS
 // One growing PSRAM buffer for a message: prefix, base64 of the bytes, suffix. Only the loop's task
 // sends, so one buffer is enough.
 uint8_t* g_msg = nullptr;
@@ -82,7 +77,6 @@ bool sendBase64(const char* prefix, const uint8_t* bytes, size_t len, const char
   memcpy(g_msg + pre + n, suffix, suf);
   return ws.sendTXT(g_msg, pre + n + suf);
 }
-#endif
 
 #if CAGI_SPEAKER_ENABLED
 // The speaker as an output plus the presence controls that drive it. The schemas are the ones
@@ -203,9 +197,7 @@ void onEvent(WStype_t type, uint8_t* payload, size_t len) {
       break;
     case WStype_TEXT:
       if (Ota::onMessage(payload, len)) break;  // firmware_report / _update / _rollback (src/ota.cpp)
-#if CAGI_DEVICE_SEALS
       if (Seal::onMessage(payload, len)) break;
-#endif
 #if CAGI_SPEAKER_ENABLED
       onText(payload, len);
 #endif
@@ -268,12 +260,6 @@ void loop() {
 
 bool connected() { return g_started && g_connected; }
 
-bool sendFrame(const uint8_t* buf, size_t len) {
-  if (!g_started || !g_connected) return false;
-  return ws.sendBIN(buf, len);
-}
-
-#if CAGI_DEVICE_SEALS
 bool sendFrameJson(const char* channelId, const uint8_t* jpeg, size_t len) {
   if (!g_started || !g_connected) return false;
   char prefix[128];
@@ -287,7 +273,6 @@ bool sendLines(const char* channelId, const char* kind, const char* lines, size_
   snprintf(prefix, sizeof prefix, "{\"type\":\"data\",\"channelId\":\"%s\",\"kind\":\"%s\",\"format\":\"jsonl\",\"url\":\"data:text/plain;base64,", channelId, kind);
   return sendBase64(prefix, (const uint8_t*)lines, len, "\"}");
 }
-#endif
 
 bool sendText(const String& json) {
   if (!g_started || !g_connected) return false;

@@ -1,6 +1,5 @@
 #include "seal_runtime.h"
 
-#if CAGI_DEVICE_SEALS
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
@@ -386,4 +385,3 @@ bool onMessage(const uint8_t* payload, size_t len) {
 }
 
 }  // namespace Seal
-#endif

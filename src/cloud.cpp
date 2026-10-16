@@ -109,7 +109,7 @@ static bool postMedia(const Creds& c, const String& url, const char* contentType
   http.setTimeout(8000);  // bound the call so a black-hole network can't wedge the loop indefinitely
   if (!http.begin(g_tls, url)) {
     r->code = -1;
-    Serial.println("[cloud] frame POST: begin() failed (TLS/URL)");
+    Serial.println("[cloud] audio POST: begin() failed (TLS/URL)");
     return false;
   }
   http.addHeader("Authorization", "Bearer " + c.apiKey);
@@ -122,7 +122,7 @@ static bool postMedia(const Creds& c, const String& url, const char* contentType
   r->authFailed = (code == 401 || code == 403);  // bad/revoked/expired API key
   r->ok = code >= 200 && code < 300;
   if (r->ok) parseControl(body, ctl);
-  else Serial.printf("[cloud] frame POST → %d\n", code);
+  else Serial.printf("[cloud] audio POST → %d\n", code);
   return r->ok;
 }
 
@@ -180,12 +180,6 @@ bool ensureRegistered(Creds& c) {
   Status::setRegistration(c.sessionId, c.deviceId);
   Serial.printf("[cloud] registered session=%s device=%s\n", c.sessionId.c_str(), c.deviceId.c_str());
   return true;
-}
-
-bool postFrame(const Creds& c, const uint8_t* buf, size_t len, unsigned long intervalMs, PostResult* res, Control* ctl) {
-  String url = c.apiBaseUrl + "/v1/streams/" + c.sessionId + "/" + c.deviceId +
-               "/frame?channel=" + CAGI_STREAM_CHANNEL + "&kind=camera&intervalMs=" + String(intervalMs);
-  return postMedia(c, url, "image/jpeg", buf, len, res, ctl);
 }
 
 bool postAudio(const Creds& c, const uint8_t* buf, size_t len, PostResult* res, Control* ctl) {

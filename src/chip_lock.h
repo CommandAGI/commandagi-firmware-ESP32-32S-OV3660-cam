@@ -6,10 +6,6 @@
 #include "chip_lock_status.h"
 #include "config.h"
 
-#if CAGI_PROV_PIN_NVS && !CAGI_DEVICE_SEALS
-#error "CAGI_PROV_PIN_NVS needs CAGI_DEVICE_SEALS: the factory's serial commands run in the sealing build"
-#endif
-
 namespace ChipLock {
 
 // Read from the eFuses, the flash encryption state and the partition table on each call.

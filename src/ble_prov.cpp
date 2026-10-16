@@ -51,12 +51,10 @@ String infoJson() {
 #if CAGI_PROV_SECURE
   d["salt"] = g_saltHex;  // the app derives the PIN key from this + the PIN
 #endif
-#if CAGI_DEVICE_SEALS
   // The key that seals this unit's stream (base64url SubjectPublicKeyInfo). It names nothing by itself:
   // a certificate from the factory (README § Sealed stream) says whose unit it is.
   const String key = Seal::spki();
   if (key.length()) d["sealKey"] = key;
-#endif
   String out;
   serializeJson(d, out);
   return out;

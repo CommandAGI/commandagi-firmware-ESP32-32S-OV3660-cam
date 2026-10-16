@@ -270,11 +270,9 @@ void setup() {
   // starves NimBLE (it asserts on a null mutex handle and boot-loops). BLE-first reserves its memory,
   // and wiring the STATUS notifier before the camera means a camera failure still notifies the app.
   BleProv::begin();
-#if CAGI_DEVICE_SEALS
   // After BleProv::begin(): the radio is on, so a first boot's key is truly random. Before the mic
   // refreshes INFO, so INFO carries the key. Its buffers are in PSRAM, not the camera's DMA RAM.
   Seal::begin();
-#endif
 
   g_cameraOk = Camera::begin();
   g_audioOk = Audio::begin();  // optional mic — false (and harmless) if absent
@@ -313,9 +311,7 @@ void loop() {
     if (changed) g_nextRuntimeStatus = 0;  // the socket hears an IR change at once
   }
 #endif
-#if CAGI_DEVICE_SEALS
   Seal::serial();  // the factory reads the key and stores its certificate chain here, before any creds
-#endif
   // The app wrote fresh creds — reload and force a clean reconnect (possibly a new account).
   if (BleProv::consumeNewProvisioning()) {
     reloadCreds();
@@ -371,7 +367,7 @@ void loop() {
   }
 
   // Open + service the realtime frame socket (idempotent). This is the high-fps transport: one held
-  // wss connection the camera streams binary JPEG over, instead of one HTTPS POST per frame.
+  // wss connection the camera streams its sealed frames over (src/seal_runtime.cpp).
   if (!CloudWs::connected() && g_wsStartedAt == 0) g_wsStartedAt = now;
   CloudWs::begin(g_creds);
   CloudWs::loop();
@@ -390,12 +386,10 @@ void loop() {
     return;
   }
 
-#if CAGI_DEVICE_SEALS
   // Seal each second and send the lines, also while the operator has the camera off.
   Seal::loop(g_creds);
   // A frame on demand: captured, sealed and answered now, before the cadence below (README § Sealed stream).
   Seal::serveFrameRequest(g_cameraOk && g_camDesired);
-#endif
 
   // Control (sensor on/off + cadence) rides a low-rate HTTP poll, decoupled from the frame stream —
   // the WS frame path carries no per-frame response, so this is how a streaming camera learns about a
@@ -430,11 +424,7 @@ void loop() {
     size_t len = 0;
     if (Camera::capture(&buf, &len)) {
       g_captureFails = 0;
-#if CAGI_DEVICE_SEALS
       bool sent = Seal::sendFrame(buf, len);  // stamped, sent, indexed and sealed by the device
-#else
-      bool sent = CloudWs::sendFrame(buf, len);
-#endif
       Camera::release();
       if (sent) {
         noteStreamOk();

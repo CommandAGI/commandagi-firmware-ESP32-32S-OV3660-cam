@@ -34,7 +34,7 @@ WiFi modem sleep when both WiFi and Bluetooth are enabled".
 ## Remote sensor control without a socket
 
 The camera is an HTTP poller, not a WebSocket host. It learns the operator's desired cam/mic state
-two ways: (1) piggybacked on every frame/audio POST **response** (`{ sensors: { cam, mic } }`) while
+two ways: (1) piggybacked on every audio POST **response** (`{ sensors: { cam, mic } }`) while
 streaming, so a toggle takes effect within one interval; (2) a `GET …/control` poll every few seconds
 while `paused` (all sensors off), so a fully-stopped camera can still be turned back on remotely. A
 missing key defaults to ON, preserving "stream everything" for a fresh unit.
@@ -59,7 +59,7 @@ only the `cagi` NVS namespace, never the app. See README → _Why it can ALWAYS 
 
 ## Sealed stream: one writer, byte for byte
 
-The sealing build (`-DCAGI_DEVICE_SEALS`) replaces the old verified-SKU capture manifest, which signed a
+The sealed stream (every build) replaces the old verified-SKU capture manifest, which signed a
 claim about each window but not the frames. Now the device signs the frames themselves: `cam`'s seals
 cover the exact bytes of its `video.mjpeg`, and each `cam-at` line names one frame's offset, length and
 sha256. Each stream is sealed in its own `records.jsonl`, so CommandAGI's verifier checks a stream from

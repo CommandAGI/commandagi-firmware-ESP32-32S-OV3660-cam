@@ -41,7 +41,7 @@ def until(s, pattern, seconds=8.0):
         m = re.search(pattern, seen, re.S)
         if m:
             return m
-    sys.exit(f"no answer from the unit (looked for {pattern!r}); is it a CAGI_DEVICE_SEALS build?")
+    sys.exit(f"no answer from the unit (looked for {pattern!r}); is its firmware this repository's?")
 
 
 def status(port, seconds):
