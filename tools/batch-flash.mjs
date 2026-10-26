@@ -286,10 +286,10 @@ async function recordToLedger({ mac, suffix, pin, fw, at }) {
   }
   const flashedBy = `${(() => { try { return userInfo().username; } catch { return "?"; } })()}@${hostname()}`;
   try {
-    const res = await fetch(`${recordBase}/ops/cameras/flashed`, {
+    const res = await fetch(`${recordBase}/ops/devices/flashed`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${recordSecret}` },
-      body: JSON.stringify({ mac, suffix: suffix || "", pin, fw, flashedBy, flashedAt: Date.parse(at) }),
+      body: JSON.stringify({ kind: "camera", mac, suffix: suffix || "", pin, fw, flashedBy, flashedAt: Date.parse(at) }),
     });
     if (res.ok) console.log(`▶ recorded to D1 ledger (${recordBase})`);
     else console.warn(`⚠ D1 ledger POST failed: ${res.status} ${await res.text().catch(() => "")}`);
