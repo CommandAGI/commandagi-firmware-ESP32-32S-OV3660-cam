@@ -42,14 +42,9 @@ missing key defaults to ON, preserving "stream everything" for a fresh unit.
 ## Per-unit PIN
 
 The provisioning PIN seals the BLE payload (Wi-Fi password + account key). The reference build bakes
-`123456`; production units must each get a unique PIN — see [`tools/batch-flash.mjs`](tools/README.md),
-which mints one per board, compiles it in, and prints a label that matches the MAC suffix the app
-shows.
-
-**In the CommandAGI repository**, flash and label any product (camera, arm, robots) with its
-`scripts/hardware/flash-embodiment.mjs` (`make flash-device PRODUCT=<product>`): the same PIN-mint,
-suffix-read and `labels.csv` flow. `tools/batch-flash.mjs` is this repository's own flasher for a
-standalone clone.
+`123456`; production units must each get a unique PIN. Flash and label a unit with the CommandAGI repository's
+`scripts/hardware/flash-embodiment.mjs` (`make flash-device PRODUCT=<product>`): it mints one PIN per board,
+compiles it in, reads the MAC suffix back and prints a label that matches what the app shows (`labels.csv`).
 
 ## Always re-flashable
 

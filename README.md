@@ -574,7 +574,7 @@ test/host/          clip_test.cpp: the clip decoder against good and bad clips, 
                     ir_policy_test.cpp: the IR decision against a light level that crosses the thresholds
                     base_url_test.cpp: the realtime socket's scheme, host and port from apiBaseUrl
                     ota_wire_test.cpp: an update's checks, the image's url, the size and digest verdict, the slot digests
-tools/              batch-flash.mjs, read-suffix.py (labels); seal-provision.py (the key's certificate)
+tools/              seal-provision.py (the key's certificate)
   store.*           NVS credential storage
   status.*          shared lifecycle state + BLE notify
 ```

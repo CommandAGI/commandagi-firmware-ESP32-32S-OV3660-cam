@@ -1,7 +1,7 @@
 .pio/
 .vscode/
 *.bin
-# Per-unit PIN ledger from tools/batch-flash.mjs — a secret (PIN↔MAC map). Never commit.
+# Per-unit PIN ledger from scripts/hardware/flash-embodiment.mjs in the CommandAGI repository — a secret (PIN↔MAC map). Never commit.
 labels.csv
 labels.html
 .env
