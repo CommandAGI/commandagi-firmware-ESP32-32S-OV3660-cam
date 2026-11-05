@@ -97,6 +97,11 @@
   #define CAGI_MIC_PDM        1
   #define CAGI_PDM_CLK_PIN    38
   #define CAGI_PDM_DATA_PIN   39
+#elif defined(CAM_BOARD_CAGI_CAM001)
+  // CommandAGI-Cam-001 has no microphone: its free GPIOs carry the camera and the modem.
+  #if CAGI_AUDIO_ENABLED
+    #error "CommandAGI-Cam-001 (CAM_BOARD_CAGI_CAM001) has no microphone: build it with CAGI_AUDIO_ENABLED 0"
+  #endif
 #elif defined(CAM_BOARD_ESP32S3)
   #define CAGI_I2S_SCK_PIN    41   // BCLK
   #define CAGI_I2S_WS_PIN     42   // LRCL / word-select
@@ -203,8 +208,18 @@
     #define CAGI_MODEM_STATUS_PIN 12   // HIGH = modem on (internal pull-down)
     #define CAGI_MODEM_RESET_PIN  13
     #define CAGI_MODEM_RAIL_OFF_PIN -1
+  #elif defined(CAM_BOARD_CAGI_CAM001)
+    // Cam-001 base board: the S3's own GPIOs, none a strap pin. The modem's RESET is not wired; a
+    // modem that does not answer is restarted by its rail.
+    #define CAGI_MODEM_UART        1
+    #define CAGI_MODEM_TX_PIN      4   // → modem RXD
+    #define CAGI_MODEM_RX_PIN      5   // ← modem TXD (internal pull-up: the shifter floats while the modem is off)
+    #define CAGI_MODEM_PWRKEY_PIN  6
+    #define CAGI_MODEM_STATUS_PIN  7   // HIGH = modem on (internal pull-down)
+    #define CAGI_MODEM_RESET_PIN  -1
+    #define CAGI_MODEM_RAIL_OFF_PIN 8  // HIGH = modem supply off; recovery only
   #elif defined(CAM_BOARD_AITHINKER)
-    // Cam-001 base board: the five free header pins. IO13/14/15 are also the INMP441 pins.
+    // AI-Thinker ESP32-CAM on a base board: the five free header pins. IO13/14/15 are also the INMP441 pins.
     #if CAGI_AUDIO_ENABLED
       #error "On the AI-Thinker board the modem uses IO13/14/15, the INMP441's pins: enable one of them"
     #endif
@@ -286,7 +301,7 @@
 #define CAGI_NVS_NAMESPACE "cagi"  // a factory-reset erases exactly this namespace (never `cagi-seal`, the sealing key)
 
 // ── Camera pin map ──────────────────────────────────────────────────────────────────────────────
-// AI-Thinker ESP32-CAM is the default. For an ESP32-S3 board define CAM_BOARD_ESP32S3 (in
+// AI-Thinker ESP32-CAM is the default. CommandAGI-Cam-001 is CAM_BOARD_CAGI_CAM001. For another ESP32-S3 board define CAM_BOARD_ESP32S3 (in
 // platformio.ini build_flags) and fill in its pins below.
 #if defined(CAM_BOARD_DFR_S3_AICAM)
   // DFRobot ESP32-S3 AI Camera (SKU DFR1154) — OV3660, 16MB flash + 8MB PSRAM. Pin map verified
@@ -309,6 +324,30 @@
   #define HREF_GPIO_NUM    2
   #define PCLK_GPIO_NUM   15
   #define LED_GPIO_NUM     3  // on-board LED — used as the "identify" indicator
+#elif defined(CAM_BOARD_CAGI_CAM001)
+  // CommandAGI-Cam-001: an ESP32-S3-WROOM-1-N8R2 on the base board, and an M5Stack Stamp-AddOn Cam3660
+  // (OV3660) in the base board's 24-pin B2B socket. The camera pins are M5Stack's own map for this
+  // module (https://docs.m5stack.com/en/stamp/Stamp-AddOn_Cam3660), so the module is wired as its maker
+  // wires it. GPIO19/20 are the native USB; the module's PSRAM is quad, so GPIO35-37 stay free. The identify LED (D2) is
+  // driven by a transistor: HIGH = on. Pins checked against ee/Base board.sch.tsx (§ the product's
+  // schematic, at the end of this file).
+  #define PWDN_GPIO_NUM   39
+  #define RESET_GPIO_NUM  41
+  #define XCLK_GPIO_NUM   46
+  #define SIOD_GPIO_NUM   48
+  #define SIOC_GPIO_NUM   47
+  #define Y9_GPIO_NUM     40
+  #define Y8_GPIO_NUM     38
+  #define Y7_GPIO_NUM     12
+  #define Y6_GPIO_NUM     14
+  #define Y5_GPIO_NUM     15
+  #define Y4_GPIO_NUM     16
+  #define Y3_GPIO_NUM     18
+  #define Y2_GPIO_NUM     21
+  #define VSYNC_GPIO_NUM  42
+  #define HREF_GPIO_NUM   17
+  #define PCLK_GPIO_NUM   13
+  #define LED_GPIO_NUM    10  // the identify LED (D2)
 #elif defined(CAM_BOARD_ESP32S3)
   // Seeed XIAO ESP32-S3 Sense (example) — adjust to your board.
   #define PWDN_GPIO_NUM   -1
@@ -350,10 +389,10 @@
 #endif
 
 // XCLK frequency. 16 MHz is empirically the sweet spot for the OV2640 clones on AI-Thinker boards
-// (higher, stable fps). The OV3660 on the DFRobot ESP32-S3 AI Camera needs the sensor's standard
+// (higher, stable fps). The OV3660 (the DFRobot ESP32-S3 AI Camera, Cam-001's Cam3660) needs the sensor's standard
 // 20 MHz — at 16 MHz it inits over SCCB but never emits a frame ("sensor returned no frame").
 #ifndef CAGI_XCLK_HZ
-  #if defined(CAM_BOARD_DFR_S3_AICAM)
+  #if defined(CAM_BOARD_DFR_S3_AICAM) || defined(CAM_BOARD_CAGI_CAM001)
     #define CAGI_XCLK_HZ 20000000
   #else
     #define CAGI_XCLK_HZ 16000000
@@ -367,8 +406,34 @@
 // same lines with no build. Change a pin in the schematic and here together.
 #ifdef CAGI_PINS_HEADER
   #include CAGI_PINS_HEADER
-  #if defined(CAM_BOARD_AITHINKER)
-    // CommandAGI-Cam-001: the ESP32-CAM (U1) in its base board (ee/CommandAGI-Cam-001.sch.tsx).
+  #if defined(CAM_BOARD_CAGI_CAM001)
+    // CommandAGI-Cam-001: the ESP32-S3 module (U2) on its base board (ee/Base board.sch.tsx).
+    CAGI_PIN_IS(XCLK_GPIO_NUM, CAM_XCLK);
+    CAGI_PIN_IS(SIOD_GPIO_NUM, CAM_SDA);
+    CAGI_PIN_IS(SIOC_GPIO_NUM, CAM_SCL);
+    CAGI_PIN_IS(Y2_GPIO_NUM, CAM_D0);
+    CAGI_PIN_IS(Y3_GPIO_NUM, CAM_D1);
+    CAGI_PIN_IS(Y4_GPIO_NUM, CAM_D2);
+    CAGI_PIN_IS(Y5_GPIO_NUM, CAM_D3);
+    CAGI_PIN_IS(Y6_GPIO_NUM, CAM_D4);
+    CAGI_PIN_IS(Y7_GPIO_NUM, CAM_D5);
+    CAGI_PIN_IS(Y8_GPIO_NUM, CAM_D6);
+    CAGI_PIN_IS(Y9_GPIO_NUM, CAM_D7);
+    CAGI_PIN_IS(VSYNC_GPIO_NUM, CAM_VSYNC);
+    CAGI_PIN_IS(HREF_GPIO_NUM, CAM_HREF);
+    CAGI_PIN_IS(PCLK_GPIO_NUM, CAM_PCLK);
+    CAGI_PIN_IS(PWDN_GPIO_NUM, CAM_PWDN);
+    CAGI_PIN_IS(RESET_GPIO_NUM, CAM_RESET);
+    CAGI_PIN_IS(LED_GPIO_NUM, LED_IDENTIFY);
+    #if CAGI_CELLULAR_ENABLED
+      CAGI_PIN_IS(CAGI_MODEM_TX_PIN, MODEM_RXD);
+      CAGI_PIN_IS(CAGI_MODEM_RX_PIN, MODEM_TXD);
+      CAGI_PIN_IS(CAGI_MODEM_PWRKEY_PIN, MODEM_PWRKEY);
+      CAGI_PIN_IS(CAGI_MODEM_STATUS_PIN, MODEM_STATUS);
+      CAGI_PIN_IS(CAGI_MODEM_RAIL_OFF_PIN, MODEM_RAIL_OFF);
+    #endif
+  #elif defined(CAM_BOARD_AITHINKER)
+    // An AI-Thinker ESP32-CAM in a base board whose schematic names these nets.
     CAGI_PIN_IS(XCLK_GPIO_NUM, IO0_XCLK_BOOT);
     CAGI_PIN_IS(LED_GPIO_NUM, IO4_FLASH);
     #if CAGI_CELLULAR_ENABLED

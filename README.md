@@ -33,6 +33,9 @@ its own. See [the hardware notes](hardware/README.md) for the board and security
 ## Hardware
 
 - **AI-Thinker ESP32-CAM** (ESP32 + OV2640, 4 MB flash, PSRAM) — the default.
+- **CommandAGI-Cam-001** (`-DCAM_BOARD_CAGI_CAM001`): an ESP32-S3-WROOM-1-N8R2 and an M5Stack Stamp-AddOn
+  Cam3660 (OV3660) on one base board, flashed over its USB-C (native USB). Its env is in
+  `hardware/CommandAGI-Cam-001/firmware/platformio.ini` of CommandAGI.
 - A USB-UART adapter (FTDI/CP2102) for the first flash, or an ESP32-CAM-MB programmer board.
 - Other boards (e.g. ESP32-S3 cams) work by editing the pin map in [`src/config.h`](src/config.h) and
   adding `-DCAM_BOARD_ESP32S3` to `build_flags`.
@@ -113,7 +116,8 @@ without change. Default is off (`0`).
 
 | env | board | modem pins (`src/config.h`) |
 | --- | --- | --- |
-| `esp32cam-cellular` | AI-Thinker + Cam-001 base board | UART2: RX IO13, TX IO14; PWRKEY IO12; STATUS IO15; rail off IO2. No mic: IO13/14/15 are the INMP441's pins |
+| `commandagi-cam-001` (the product's ini) | Cam-001: ESP32-S3-WROOM-1-N8R2 on its base board | UART1: TX GPIO4, RX GPIO5; PWRKEY GPIO6; STATUS GPIO7; rail off GPIO8. No mic |
+| `esp32cam-cellular` | AI-Thinker + a base board | UART2: RX IO13, TX IO14; PWRKEY IO12; STATUS IO15; rail off IO2. No mic: IO13/14/15 are the INMP441's pins |
 | `esp32cam-s3-cellular` | DFR1154 + Cam-002 carrier | UART1: TX GPIO43, RX GPIO44 (Gravity); PWRKEY GPIO11; STATUS GPIO12; RESET GPIO13 (microSD contacts) |
 
 Pins come from `hardware/CommandAGI-Cam-001/README.md` and `hardware/CommandAGI-Cam-002/README.md`
