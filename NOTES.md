@@ -131,7 +131,7 @@ burst draws more than the boards supply), and never logs an AT command (AT+CPIN 
 
 ## IR night mode: the light sensor shares the camera's I2C port
 
-The LTR-308 sits on GPIO8/9, the camera's SCCB lines. The camera driver installs the legacy I2C driver
+The LTR-308 sits on GPIO8/9, the camera's SCCB lines. The camera driver installs ESP-IDF's driver/i2c.h I2C driver
 on its SCCB port (port 1: `CONFIG_SCCB_HARDWARE_I2C_PORT1` in both S3 sdkconfigs). Arduino's `Wire`
 would start a second controller (port 0) on the same pins, and two controllers on one bus fight. That
 is why DFRobot's example says to start the camera before the sensor. So `ir.cpp` talks to the sensor
